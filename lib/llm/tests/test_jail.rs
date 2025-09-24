@@ -1874,6 +1874,10 @@ mod tests {
 #[cfg(test)]
 mod parallel_jail_tests {
     use super::*;
+    use super::tests::test_utils;
+    use futures::stream;
+    use futures::StreamExt;
+    use serde_json::json;
     use dynamo_async_openai::types::{ChatCompletionMessageToolCallChunk, FunctionCallStream};
 
     /// Helper function to create a mock response chunk with multiple choices
@@ -1965,8 +1969,8 @@ mod parallel_jail_tests {
             let tool_call = &all_tool_calls[i];
             assert!(tool_call.id.is_some(), "Tool call {} should have an ID", i);
             assert_eq!(
-                tool_call.r#type.as_deref(),
-                Some("function"),
+                tool_call.r#type,
+                Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
                 "Tool call {} should be of type 'function'",
                 i
             );
@@ -2388,7 +2392,7 @@ mod parallel_jail_tests {
                     if let Some(ref tool_calls) = choice.delta.tool_calls {
                         for tool_call in tool_calls {
                             if let Some(ref function) = tool_call.function {
-                                if let Some(ref args_str) = function.arguments {
+                                if let Some(args_str) = &function.arguments {
                                     let parsed_args: serde_json::Value =
                                         serde_json::from_str(args_str)
                                             .expect("Arguments should be valid JSON");
