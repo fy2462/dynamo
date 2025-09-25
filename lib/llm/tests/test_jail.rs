@@ -1873,12 +1873,12 @@ mod tests {
 // Comprehensive parallel tool calling jail tests
 #[cfg(test)]
 mod parallel_jail_tests {
-    use super::*;
     use super::tests::test_utils;
-    use futures::stream;
-    use futures::StreamExt;
-    use serde_json::json;
+    use super::*;
     use dynamo_async_openai::types::{ChatCompletionMessageToolCallChunk, FunctionCallStream};
+    use futures::StreamExt;
+    use futures::stream;
+    use serde_json::json;
 
     /// Helper function to create a mock response chunk with multiple choices
     fn create_multi_choice_response_chunk(

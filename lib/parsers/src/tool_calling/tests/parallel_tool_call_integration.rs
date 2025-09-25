@@ -14,13 +14,9 @@
 //! - Testing error handling with malformed content
 //! - Ensuring tool call IDs are unique and properly formatted
 
-use crate::{
-    parsers::detect_and_parse_tool_call,
-    response::ToolCallResponse,
-};
+use crate::{parsers::detect_and_parse_tool_call, response::ToolCallResponse};
 use dynamo_llm::protocols::openai::{
-    chat_completions::NvCreateChatCompletionRequest,
-    common_ext::CommonExt,
+    chat_completions::NvCreateChatCompletionRequest, common_ext::CommonExt,
 };
 use serde_json::json;
 
@@ -115,11 +111,15 @@ fn get_mock_response_content() -> String {
 fn validate_weather_tool_call(tool_call: &ToolCallResponse) {
     assert_eq!(tool_call.function.name, "get_current_weather");
 
-    let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments).expect("Arguments should be valid JSON");
+    let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
+        .expect("Arguments should be valid JSON");
     let args_obj = args.as_object().expect("Arguments should be an object");
     assert_eq!(args_obj.get("city").unwrap().as_str().unwrap(), "Dallas");
     assert_eq!(args_obj.get("state").unwrap().as_str().unwrap(), "TX");
-    assert_eq!(args_obj.get("unit").unwrap().as_str().unwrap(), "fahrenheit");
+    assert_eq!(
+        args_obj.get("unit").unwrap().as_str().unwrap(),
+        "fahrenheit"
+    );
 
     // Validate OpenAI compatibility
     assert!(!tool_call.id.is_empty(), "Tool call should have an ID");
@@ -130,9 +130,13 @@ fn validate_weather_tool_call(tool_call: &ToolCallResponse) {
 fn validate_holiday_tool_call(tool_call: &ToolCallResponse) {
     assert_eq!(tool_call.function.name, "is_holiday_today");
 
-    let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments).expect("Arguments should be valid JSON");
+    let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
+        .expect("Arguments should be valid JSON");
     let args_obj = args.as_object().expect("Arguments should be an object");
-    assert!(args_obj.is_empty(), "Holiday tool should have empty arguments");
+    assert!(
+        args_obj.is_empty(),
+        "Holiday tool should have empty arguments"
+    );
 
     // Validate OpenAI compatibility
     assert!(!tool_call.id.is_empty(), "Tool call should have an ID");
@@ -143,7 +147,11 @@ fn validate_holiday_tool_call(tool_call: &ToolCallResponse) {
 fn validate_unique_tool_call_ids(tool_calls: &[ToolCallResponse]) {
     let mut ids = std::collections::HashSet::new();
     for tool_call in tool_calls {
-        assert!(ids.insert(tool_call.id.clone()), "Tool call IDs should be unique: {}", tool_call.id);
+        assert!(
+            ids.insert(tool_call.id.clone()),
+            "Tool call IDs should be unique: {}",
+            tool_call.id
+        );
     }
 }
 
@@ -187,12 +195,17 @@ async fn test_parallel_tool_call_parsing() {
     let response_content = get_mock_response_content();
 
     // Parse the tool calls using the hermes parser (works well with <tool_call> format)
-    let (tool_calls, remaining_content) = detect_and_parse_tool_call(&response_content, Some("hermes"))
-        .await
-        .expect("Should successfully parse tool calls");
+    let (tool_calls, remaining_content) =
+        detect_and_parse_tool_call(&response_content, Some("hermes"))
+            .await
+            .expect("Should successfully parse tool calls");
 
     // Validate we got exactly 2 tool calls
-    assert_eq!(tool_calls.len(), 2, "Should parse exactly 2 parallel tool calls");
+    assert_eq!(
+        tool_calls.len(),
+        2,
+        "Should parse exactly 2 parallel tool calls"
+    );
 
     // Validate remaining content (should be the thinking part)
     assert!(remaining_content.is_some());
@@ -220,16 +233,21 @@ async fn test_parallel_tool_call_with_explicit_parser() {
 
     // Test with explicit parser selection
     let parsers_to_test = vec![
-        "hermes",     // Should work well with this format
+        "hermes", // Should work well with this format
     ];
 
     for parser in parsers_to_test {
-        let (tool_calls, remaining_content) = detect_and_parse_tool_call(&response_content, Some(parser))
-            .await
-            .unwrap_or_else(|e| panic!("Should successfully parse with {parser} parser: {e}"));
+        let (tool_calls, remaining_content) =
+            detect_and_parse_tool_call(&response_content, Some(parser))
+                .await
+                .unwrap_or_else(|e| panic!("Should successfully parse with {parser} parser: {e}"));
 
         // Should get 2 tool calls regardless of parser
-        assert_eq!(tool_calls.len(), 2, "Parser {parser} should find 2 tool calls");
+        assert_eq!(
+            tool_calls.len(),
+            2,
+            "Parser {parser} should find 2 tool calls"
+        );
 
         // Validate remaining content exists
         assert!(remaining_content.is_some());
@@ -254,8 +272,8 @@ async fn test_tool_call_json_structure() {
 
     // Test JSON serialization
     for tool_call in &tool_calls {
-        let json_str = serde_json::to_string(tool_call)
-            .expect("Tool call should serialize to JSON");
+        let json_str =
+            serde_json::to_string(tool_call).expect("Tool call should serialize to JSON");
 
         // Verify the JSON contains expected fields
         assert!(json_str.contains("\"id\""));
@@ -277,15 +295,31 @@ async fn test_openai_compatibility_structure() {
     for tool_call in &tool_calls {
         // Should have all required OpenAI fields
         assert!(!tool_call.id.is_empty(), "Missing required 'id' field");
-        assert_eq!(tool_call.tp, crate::response::ToolCallType::Function, "Type should be 'function'");
-        assert!(!tool_call.function.name.is_empty(), "Function name should not be empty");
+        assert_eq!(
+            tool_call.tp,
+            crate::response::ToolCallType::Function,
+            "Type should be 'function'"
+        );
+        assert!(
+            !tool_call.function.name.is_empty(),
+            "Function name should not be empty"
+        );
 
-        let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments).expect("Arguments should be valid JSON");
+        let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
+            .expect("Arguments should be valid JSON");
         assert!(args.is_object(), "Arguments should be an object");
 
         // ID should follow expected format (call-XXXXXXXX or call_XXXXXXXX)
-        assert!(tool_call.id.starts_with("call-") || tool_call.id.starts_with("call_"), "ID should start with 'call-' or 'call_': {}", tool_call.id);
-        assert!(tool_call.id.len() > 5, "ID should be longer than just 'call': {}", tool_call.id);
+        assert!(
+            tool_call.id.starts_with("call-") || tool_call.id.starts_with("call_"),
+            "ID should start with 'call-' or 'call_': {}",
+            tool_call.id
+        );
+        assert!(
+            tool_call.id.len() > 5,
+            "ID should be longer than just 'call': {}",
+            tool_call.id
+        );
     }
 }
 
@@ -306,12 +340,18 @@ async fn test_parallel_tool_call_error_handling() {
     match result {
         Ok((tool_calls, _)) => {
             // May parse valid tool calls and ignore malformed ones, or return empty
-            println!("Parsed {} tool calls from malformed content", tool_calls.len());
+            println!(
+                "Parsed {} tool calls from malformed content",
+                tool_calls.len()
+            );
 
             if !tool_calls.is_empty() {
                 // If any were parsed, verify they're valid
                 for call in &tool_calls {
-                    assert!(!call.function.name.is_empty(), "Parsed tool call should have valid name");
+                    assert!(
+                        !call.function.name.is_empty(),
+                        "Parsed tool call should have valid name"
+                    );
                 }
             }
         }
@@ -326,11 +366,18 @@ async fn test_parallel_tool_call_error_handling() {
 async fn test_empty_tool_calls() {
     let content_without_tools = "This is just a regular response without any tool calls.";
 
-    let (tool_calls, remaining_content) = detect_and_parse_tool_call(content_without_tools, Some("hermes"))
-        .await
-        .expect("Should handle content without tool calls");
+    let (tool_calls, remaining_content) =
+        detect_and_parse_tool_call(content_without_tools, Some("hermes"))
+            .await
+            .expect("Should handle content without tool calls");
 
-    assert!(tool_calls.is_empty(), "Should return empty tool calls array");
-    assert!(remaining_content.is_some(), "Should return the original content");
+    assert!(
+        tool_calls.is_empty(),
+        "Should return empty tool calls array"
+    );
+    assert!(
+        remaining_content.is_some(),
+        "Should return the original content"
+    );
     assert_eq!(remaining_content.unwrap(), content_without_tools);
 }
