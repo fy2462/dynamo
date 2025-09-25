@@ -1334,6 +1334,14 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_unsupported_fields_accepts_parallel_tool_calls() {
+        let mut request = make_base_request();
+        request.inner.parallel_tool_calls = Some(true);
+        let result = validate_response_unsupported_fields(&request);
+        assert!(result.is_none(), "parallel_tool_calls should be supported");
+    }
+
+    #[test]
     fn test_validate_unsupported_fields_detects_flags() {
         #[allow(clippy::type_complexity)]
         let unsupported_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
@@ -1348,10 +1356,6 @@ mod tests {
             ),
             ("max_tool_calls", Box::new(|r| r.max_tool_calls = Some(3))),
             ("metadata", Box::new(|r| r.metadata = Some(HashMap::new()))),
-            (
-                "parallel_tool_calls",
-                Box::new(|r| r.parallel_tool_calls = Some(true)),
-            ),
             (
                 "previous_response_id",
                 Box::new(|r| r.previous_response_id = Some("prev-id".into())),
