@@ -14,10 +14,10 @@
 //! - Testing error handling with malformed content
 //! - Ensuring tool call IDs are unique and properly formatted
 
-use crate::{parsers::detect_and_parse_tool_call, response::ToolCallResponse};
 use dynamo_llm::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, common_ext::CommonExt,
 };
+use dynamo_parsers::{ToolCallResponse, ToolCallType, detect_and_parse_tool_call};
 use serde_json::json;
 
 /// Creates a mock NvCreateChatCompletionRequest based on the curl request
@@ -123,7 +123,7 @@ fn validate_weather_tool_call(tool_call: &ToolCallResponse) {
 
     // Validate OpenAI compatibility
     assert!(!tool_call.id.is_empty(), "Tool call should have an ID");
-    assert_eq!(tool_call.tp, crate::response::ToolCallType::Function);
+    assert_eq!(tool_call.tp, ToolCallType::Function);
 }
 
 /// Validates that a holiday tool call response matches expected values
@@ -140,7 +140,7 @@ fn validate_holiday_tool_call(tool_call: &ToolCallResponse) {
 
     // Validate OpenAI compatibility
     assert!(!tool_call.id.is_empty(), "Tool call should have an ID");
-    assert_eq!(tool_call.tp, crate::response::ToolCallType::Function);
+    assert_eq!(tool_call.tp, ToolCallType::Function);
 }
 
 /// Validates that tool call IDs are unique
@@ -297,7 +297,7 @@ async fn test_openai_compatibility_structure() {
         assert!(!tool_call.id.is_empty(), "Missing required 'id' field");
         assert_eq!(
             tool_call.tp,
-            crate::response::ToolCallType::Function,
+            ToolCallType::Function,
             "Type should be 'function'"
         );
         assert!(
