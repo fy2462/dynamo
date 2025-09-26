@@ -31,6 +31,7 @@ fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) ->
     let escaped_end = regex::escape(end_token);
     let pattern = format!(r"{}(.*?){}", escaped_start, escaped_end);
 
+
     match RegexBuilder::new(&pattern)
         .dot_matches_new_line(true)
         .build()
@@ -46,15 +47,41 @@ fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) ->
                 // If only one match, return it directly, otherwise return as a JSON array string
                 if matches.len() == 1 {
                     // Return the last match directly
-                    return Some(matches.last().unwrap().clone());
+                    let result = matches.last().unwrap().clone();
+                    return Some(result);
                 } else {
                     // Join the matches into a JSON array string
-                    return Some(format!("[{}]", matches.join(",")));
+                    let result = format!("[{}]", matches.join(","));
+                    return Some(result);
                 }
             }
             None
         }
-        Err(_) => None,
+        Err(_e) => {
+            None
+        }
+    }
+}
+
+fn normalize_json_string_escapes(value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            // Ensure common escaped quotes inside string are normalized
+            if s.contains("\\\"") {
+                *s = s.replace("\\\"", "\"");
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                normalize_json_string_escapes(v);
+            }
+        }
+        Value::Object(map) => {
+            for v in map.values_mut() {
+                normalize_json_string_escapes(v);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -119,6 +146,97 @@ fn try_parse_normal_text(input: &str, start_token: &str) -> String {
 
     // No start token found, return empty string
     String::new()
+}
+
+/// Try to parse a malformed JSON array and extract valid entries
+/// This function handles cases where some entries in a JSON array are malformed
+/// but others are valid and should be extracted
+fn try_parse_malformed_array<F>(
+    json: &str,
+    parse_fn: &F,
+) -> anyhow::Result<Vec<ToolCallResponse>>
+where
+    F: Fn(String, HashMap<String, Value>) -> anyhow::Result<ToolCallResponse>,
+{
+    let mut results = Vec::new();
+
+    // Remove the outer brackets
+    let inner = json.trim();
+    if !inner.starts_with('[') || !inner.ends_with(']') {
+        return Ok(results);
+    }
+
+    let inner = &inner[1..inner.len()-1].trim();
+
+    // Try to split by commas, but be smart about nested objects
+    let mut entries = Vec::new();
+    let mut current_entry = String::new();
+    let mut brace_count = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for ch in inner.chars() {
+        if escape_next {
+            current_entry.push(ch);
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_string => {
+                escape_next = true;
+                current_entry.push(ch);
+            }
+            '"' => {
+                in_string = !in_string;
+                current_entry.push(ch);
+            }
+            '{' if !in_string => {
+                brace_count += 1;
+                current_entry.push(ch);
+            }
+            '}' if !in_string => {
+                brace_count -= 1;
+                current_entry.push(ch);
+            }
+            ',' if !in_string && brace_count == 0 => {
+                // Found a separator at the top level
+                entries.push(current_entry.trim().to_string());
+                current_entry.clear();
+            }
+            _ => {
+                current_entry.push(ch);
+            }
+        }
+    }
+
+    // Don't forget the last entry
+    if !current_entry.trim().is_empty() {
+        entries.push(current_entry.trim().to_string());
+    }
+
+    // Now try to parse each entry
+    for entry in entries {
+        if entry.trim().is_empty() {
+            continue;
+        }
+
+        // Try to parse as CalledFunctionArguments first
+        if let Ok(func_args) = serde_json::from_str::<CalledFunctionArguments>(&entry) {
+            if let Ok(tool_call) = parse_fn(func_args.name, func_args.arguments) {
+                results.push(tool_call);
+            }
+        } else if let Ok(func_params) = serde_json::from_str::<CalledFunctionParameters>(&entry) {
+            if let Ok(tool_call) = parse_fn(func_params.name, func_params.parameters) {
+                results.push(tool_call);
+            }
+        } else {
+            // Entry is malformed, skip it but log it
+            tracing::debug!("Skipping malformed tool call entry: {}", entry);
+        }
+    }
+
+    Ok(results)
 }
 
 /// Attempts to parse a tool call from a raw LLM message string into a unified [`ToolCallResponse`] format.
@@ -197,8 +315,64 @@ pub fn try_tool_call_parse_basic_json(
     if !has_start_token {
         // No start tokens found, try to extract JSON directly. Everything that starts with { or [ is considered a potential JSON.
         if let Some(idx) = normal_text.find(['{', '[']) {
-            let extracted_normal = normal_text[..idx].trim().to_string();
-            let extracted_json = normal_text[idx..].trim().to_string();
+            // Split into prefix (normal text) and potential JSON payload
+            let mut extracted_normal = normal_text[..idx].trim().to_string();
+            let mut extracted_json = normal_text[idx..].trim().to_string();
+
+            // Best-effort cleanup: if the normal text prefix ends with a dangling tag like
+            // "<tool_calls>" or similar markup, strip it to avoid leaking tags into content
+            if let Some(pos) = extracted_normal.rfind('<') {
+                // If there's no closing '>' after the last '<', or if the tail looks like a tag, drop it
+                let tail = &extracted_normal[pos..];
+                if tail.contains('>') || tail.starts_with('<') {
+                    extracted_normal = extracted_normal[..pos].trim().to_string();
+                }
+            }
+
+            // Truncate extracted_json to a balanced JSON object/array to remove any trailing suffix
+            // like closing tags (e.g., "]</tool_calls>") that would break JSON parsing.
+            if let Some(first) = extracted_json.chars().next() {
+                let mut in_string = false;
+                let mut escape_next = false;
+                let mut brace_count: i32 = 0; // for '{' and '}'
+                let mut bracket_count: i32 = 0; // for '[' and ']'
+                let mut end_idx: Option<usize> = None;
+
+                match first {
+                    '{' => brace_count = 1,
+                    '[' => bracket_count = 1,
+                    _ => {}
+                }
+
+                for (i, ch) in extracted_json.char_indices().skip(1) {
+                    if escape_next {
+                        escape_next = false;
+                        continue;
+                    }
+                    match ch {
+                        '\\' if in_string => escape_next = true,
+                        '"' => in_string = !in_string,
+                        '{' if !in_string => brace_count += 1,
+                        '}' if !in_string => {
+                            brace_count -= 1;
+                        }
+                        '[' if !in_string => bracket_count += 1,
+                        ']' if !in_string => {
+                            bracket_count -= 1;
+                        }
+                        _ => {}
+                    }
+                    if brace_count == 0 && bracket_count == 0 {
+                        end_idx = Some(i + ch.len_utf8());
+                        break;
+                    }
+                }
+
+                if let Some(end) = end_idx {
+                    extracted_json = extracted_json[..end].to_string();
+                }
+            }
+
             if !extracted_json.is_empty() {
                 normal_text = extracted_normal;
                 json = extracted_json;
@@ -233,18 +407,29 @@ pub fn try_tool_call_parse_basic_json(
                 }
                 (false, false) => {
                     // Start and end token case
-                    let result = extract_tool_call_content(&json, start_token, end_token);
-                    if let Some(content) = result {
-                        // Check if we found a start token but got empty JSON back
-                        // This indicates the token was found but no valid JSON followed
-                        if content.is_empty() {
-                            found_start_token_with_no_valid_json = true;
+                    if end_token.is_empty() {
+                        // Special case: empty end token means extract everything after start token
+                        if let Some(start_pos) = json.find(start_token) {
+                            let after_start = &json[start_pos + start_token.len()..];
+                            json = after_start.to_string();
+                            normal_text = new_normal_text;
+                            break; // Found content, exit early
                         }
+                    } else {
+                        // Normal start and end token case
+                        let result = extract_tool_call_content(&json, start_token, end_token);
+                        if let Some(content) = result {
+                            // Check if we found a start token but got empty JSON back
+                            // This indicates the token was found but no valid JSON followed
+                            if content.is_empty() {
+                                found_start_token_with_no_valid_json = true;
+                            }
 
-                        json = content;
-                        normal_text = new_normal_text;
+                            json = content;
+                            normal_text = new_normal_text;
 
-                        break; // Found content, exit early
+                            break; // Found content, exit early
+                        }
                     }
                 }
                 _ => {
@@ -327,9 +512,23 @@ pub fn try_tool_call_parse_basic_json(
     } else if let Ok(list) = serde_json::from_str::<Vec<CalledFunctionArguments>>(json) {
         let mut results = Vec::new();
         for item in list {
-            results.push(parse(item.name, item.arguments)?);
+            // Normalize escape sequences inside arguments strings directly in the map
+            let mut normalized_args: HashMap<String, Value> = HashMap::with_capacity(item.arguments.len());
+            for (k, mut v) in item.arguments.into_iter() {
+                normalize_json_string_escapes(&mut v);
+                normalized_args.insert(k, v);
+            }
+            results.push(parse(item.name, normalized_args)?);
         }
         return Ok((results, Some(normal_text)));
+
+    // Handle partially malformed JSON arrays - try to extract valid entries
+    } else if json.trim_start().starts_with('[') && json.trim_end().ends_with(']') {
+        // Try to parse as a malformed array and extract valid entries
+        let results = try_parse_malformed_array(json, &parse)?;
+        if !results.is_empty() {
+            return Ok((results, Some(normal_text)));
+        }
     }
 
     // If we found a start token but no valid JSON, return empty content
@@ -599,3 +798,5 @@ mod detect_parser_tests {
         );
     }
 }
+
+

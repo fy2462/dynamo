@@ -2262,7 +2262,6 @@ fahrenheit
             let (result, _) = detect_and_parse_tool_call(&input, Some(parser))
                 .await
                 .unwrap_or_else(|e| panic!("Failed to parse with {}: {}", parser, e));
-
             assert_eq!(
                 result.len(),
                 2,

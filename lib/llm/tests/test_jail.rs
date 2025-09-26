@@ -663,6 +663,19 @@ mod tests {
         let jailed_stream = jail.apply(input_stream);
         let results: Vec<_> = jailed_stream.collect().await;
 
+        // Debug: Test mistral parser directly
+        use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
+        let test_content = "[TOOL_CALLS][{\"name\": \"get_time\", \"arguments\": {\"timezone\": \"UTC\"}}]";
+        match try_tool_call_parse_aggregate(test_content, Some("mistral")).await {
+            Ok((tool_calls, normal_text)) => {
+                tracing::debug!("Direct mistral parse test: content={:?}, tool_calls_count={}, normal_text={:?}",
+                         test_content, tool_calls.len(), normal_text);
+            }
+            Err(e) => {
+                tracing::debug!("Direct mistral parse test failed: content={:?}, error={:?}", test_content, e);
+            }
+        }
+
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
             results.len(),
@@ -1875,7 +1888,6 @@ mod tests {
 mod parallel_jail_tests {
     use super::tests::test_utils;
     use super::*;
-    use dynamo_async_openai::types::{ChatCompletionMessageToolCallChunk, FunctionCallStream};
     use futures::StreamExt;
     use futures::stream;
     use serde_json::json;
