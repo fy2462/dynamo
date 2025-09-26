@@ -1955,9 +1955,9 @@ mod parallel_jail_tests {
         let tool_call_results: Vec<_> = results
             .iter()
             .filter(|r| {
-                r.data.as_ref().map_or(false, |d| {
-                    d.choices.iter().any(|c| c.delta.tool_calls.is_some())
-                })
+                r.data
+                    .as_ref()
+                    .is_some_and(|d| d.choices.iter().any(|c| c.delta.tool_calls.is_some()))
             })
             .collect();
 
@@ -2156,12 +2156,12 @@ mod parallel_jail_tests {
 
         // Should have normal text before tool calls
         let normal_text_before = results.iter().find(|r| {
-            r.data.as_ref().map_or(false, |d| {
+            r.data.as_ref().is_some_and(|d| {
                 d.choices.iter().any(|c| {
                     c.delta
                         .content
                         .as_ref()
-                        .map_or(false, |content| content.contains("I'll check the weather"))
+                        .is_some_and(|content| content.contains("I'll check the weather"))
                 })
             })
         });
@@ -2186,11 +2186,12 @@ mod parallel_jail_tests {
 
         // Should have normal text after tool calls
         let normal_text_after = results.iter().find(|r| {
-            r.data.as_ref().map_or(false, |d| {
+            r.data.as_ref().is_some_and(|d| {
                 d.choices.iter().any(|c| {
-                    c.delta.content.as_ref().map_or(false, |content| {
-                        content.contains("Let me get that information")
-                    })
+                    c.delta
+                        .content
+                        .as_ref()
+                        .is_some_and(|content| content.contains("Let me get that information"))
                 })
             })
         });
@@ -2402,37 +2403,31 @@ mod parallel_jail_tests {
         let tool_call_results: Vec<_> = results
             .iter()
             .filter(|r| {
-                r.data.as_ref().map_or(false, |d| {
-                    d.choices.iter().any(|c| c.delta.tool_calls.is_some())
-                })
+                r.data
+                    .as_ref()
+                    .is_some_and(|d| d.choices.iter().any(|c| c.delta.tool_calls.is_some()))
             })
             .collect();
 
-        if let Some(result) = tool_call_results.first() {
-            if let Some(ref data) = result.data {
-                for choice in &data.choices {
-                    if let Some(ref tool_calls) = choice.delta.tool_calls {
-                        for tool_call in tool_calls {
-                            if let Some(ref function) = tool_call.function {
-                                if let Some(args_str) = &function.arguments {
-                                    let parsed_args: serde_json::Value =
-                                        serde_json::from_str(args_str)
-                                            .expect("Arguments should be valid JSON");
+        if let Some(result) = tool_call_results.first()
+            && let Some(ref data) = result.data
+        {
+            for choice in &data.choices {
+                if let Some(ref tool_calls) = choice.delta.tool_calls {
+                    for tool_call in tool_calls {
+                        if let Some(ref function) = tool_call.function
+                            && let Some(args_str) = &function.arguments
+                        {
+                            let parsed_args: serde_json::Value = serde_json::from_str(args_str)
+                                .expect("Arguments should be valid JSON");
 
-                                    // Verify nested structure is preserved
-                                    if function.name.as_deref() == Some("get_weather_forecast") {
-                                        assert!(
-                                            parsed_args["location"]["coordinates"]["lat"]
-                                                .is_number()
-                                        );
-                                        assert!(parsed_args["options"]["metrics"].is_array());
-                                    } else if function.name.as_deref()
-                                        == Some("get_air_quality_data")
-                                    {
-                                        assert!(parsed_args["pollutants"].is_array());
-                                        assert!(parsed_args["time_range"]["start"].is_string());
-                                    }
-                                }
+                            // Verify nested structure is preserved
+                            if function.name.as_deref() == Some("get_weather_forecast") {
+                                assert!(parsed_args["location"]["coordinates"]["lat"].is_number());
+                                assert!(parsed_args["options"]["metrics"].is_array());
+                            } else if function.name.as_deref() == Some("get_air_quality_data") {
+                                assert!(parsed_args["pollutants"].is_array());
+                                assert!(parsed_args["time_range"]["start"].is_string());
                             }
                         }
                     }
@@ -2519,7 +2514,7 @@ mod parallel_jail_tests {
 
         // Should try to parse whatever content was accumulated
         let has_some_content = results.iter().any(|r| {
-            r.data.as_ref().map_or(false, |d| {
+            r.data.as_ref().is_some_and(|d| {
                 d.choices
                     .iter()
                     .any(|c| c.delta.content.is_some() || c.delta.tool_calls.is_some())
@@ -2554,9 +2549,9 @@ mod parallel_jail_tests {
 
         // Should have normal text content but no tool calls
         let has_normal_text = results.iter().any(|r| {
-            r.data.as_ref().map_or(false, |d| {
+            r.data.as_ref().is_some_and(|d| {
                 d.choices.iter().any(|c| {
-                    c.delta.content.as_ref().map_or(false, |content| {
+                    c.delta.content.as_ref().is_some_and(|content| {
                         content.contains("I'll help you")
                             || content.contains("don't need any tools")
                     })

@@ -2179,7 +2179,7 @@ fahrenheit
     #[tokio::test]
     async fn test_parallel_mixed_argument_types() {
         let input = r#"<TOOLCALL>[
-    {"name": "type_test", "arguments": {"string": "text", "number": 42, "float": 2.718, "boolean": true, "null_value": null}},
+    {"name": "type_test", "arguments": {"string": "text", "number": 42, "float": 2.718281828459045, "boolean": true, "null_value": null}},
     {"name": "array_test", "arguments": {"empty_array": [], "string_array": ["a", "b", "c"], "mixed_array": [1, "two", true, null]}},
     {"name": "object_test", "arguments": {"empty_object": {}, "nested": {"level1": {"level2": {"value": "deep"}}}}}
 ]</TOOLCALL>"#;
@@ -2195,7 +2195,7 @@ fahrenheit
         assert_eq!(name1, "type_test");
         assert_eq!(args1["string"], "text");
         assert_eq!(args1["number"], 42);
-        assert_eq!(args1["float"], 2.718);
+        assert_eq!(args1["float"], std::f64::consts::E);
         assert_eq!(args1["boolean"], true);
         assert!(args1["null_value"].is_null());
 
