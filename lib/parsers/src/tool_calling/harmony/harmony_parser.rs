@@ -160,34 +160,6 @@ pub async fn parse_tool_calls_harmony(
             });
         }
     }
-    // TODO(elyas): remove this fallback
-    // Fallback: if no tool calls parsed via harmony encoding, try a regex-based extraction
-    if res.is_empty() {
-        // Pattern: to=functions.NAME ... <|message|>{JSON}<|call|>
-        if let Ok(re) = regex::RegexBuilder::new(
-            r"to=functions\.(?P<name>[A-Za-z0-9_]+)[\s\S]*?<\|message\|>(?P<json>\{[\s\S]*?\})<\|call\|>"
-        ).dot_matches_new_line(true).build() {
-            tracing::debug!("harmony_fallback_regex_active");
-            let mut idx = 0usize;
-            for caps in re.captures_iter(text) {
-                let fname = caps.name("name").map(|m| m.as_str()).unwrap_or("");
-                let json = caps.name("json").map(|m| m.as_str()).unwrap_or("");
-                tracing::debug!("harmony_match: name={}, json={}", fname, json);
-                if fname.is_empty() || json.is_empty() { continue; }
-                if let Ok(args) = serde_json::from_str::<serde_json::Value>(json) {
-                    idx += 1;
-                    res.push(ToolCallResponse {
-                        id: format!("call-{}", idx),
-                        tp: ToolCallType::Function,
-                        function: CalledFunction {
-                            name: fname.to_string(),
-                            arguments: serde_json::to_string(&args).unwrap_or("{}".to_string()),
-                        },
-                    });
-                }
-            }
-        }
-    }
     Ok((res, Some(normal_text.to_string())))
 }
 /// Parse tool calls from a complete Harmony Format text chunk using direct token parsing.
@@ -213,52 +185,6 @@ pub async fn parse_tool_calls_harmony_complete(
     text: &str,
     _config: &JsonParserConfig,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
-    // Fast-path regex extraction for multiple harmony tool calls
-    if let Ok(re) = regex::RegexBuilder::new(
-        r"<\|start\|>assistant<\|channel\|>commentary\s+to=functions\.(?P<name>[A-Za-z0-9_]+)[\s\S]*?<\|message\|>(?P<json>\{[\s\S]*?\})<\|call\|>"
-    ).dot_matches_new_line(true).build() {
-        let mut res = Vec::new();
-        let mut idx = 0usize;
-        for caps in re.captures_iter(text) {
-            let fname = caps.name("name").map(|m| m.as_str()).unwrap_or("");
-            let json = caps.name("json").map(|m| m.as_str()).unwrap_or("");
-            if fname.is_empty() || json.is_empty() { continue; }
-            if let Ok(args) = serde_json::from_str::<Value>(json) {
-                idx += 1;
-                res.push(ToolCallResponse {
-                    id: format!("call-{}", idx),
-                    tp: ToolCallType::Function,
-                    function: CalledFunction {
-                        name: fname.to_string(),
-                        arguments: serde_json::to_string(&args).unwrap_or("{}".to_string()),
-                    },
-                });
-            }
-        }
-        if !res.is_empty() {
-            // Also extract analysis channel normal text (strict and relaxed patterns)
-            let mut analysis_text = String::new();
-            let patterns = [
-                r"<\|start\|>assistant<\|channel\|>analysis[\s\S]*?<\|message\|>(?P<text>[\s\S]*?)<\|end\|>",
-                r"<\|channel\|>analysis<\|message\|>(?P<text>[\s\S]*?)<\|end\|>",
-            ];
-            for pat in patterns {
-                if let Ok(re_analysis) = regex::RegexBuilder::new(pat)
-                    .dot_matches_new_line(true)
-                    .build()
-                {
-                    for caps in re_analysis.captures_iter(text) {
-                        let t = caps.name("text").map(|m| m.as_str()).unwrap_or("");
-                        if !t.is_empty() {
-                            analysis_text.push_str(t);
-                        }
-                    }
-                }
-            }
-            return Ok((res, Some(analysis_text)));
-        }
-    }
-
     let enc = match get_harmony_encoding().await.as_ref() {
         Ok(e) => e,
         Err(e) => {
