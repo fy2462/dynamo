@@ -665,14 +665,23 @@ mod tests {
 
         // Debug: Test mistral parser directly
         use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
-        let test_content = "[TOOL_CALLS][{\"name\": \"get_time\", \"arguments\": {\"timezone\": \"UTC\"}}]";
+        let test_content =
+            "[TOOL_CALLS][{\"name\": \"get_time\", \"arguments\": {\"timezone\": \"UTC\"}}]";
         match try_tool_call_parse_aggregate(test_content, Some("mistral")).await {
             Ok((tool_calls, normal_text)) => {
-                tracing::debug!("Direct mistral parse test: content={:?}, tool_calls_count={}, normal_text={:?}",
-                         test_content, tool_calls.len(), normal_text);
+                tracing::debug!(
+                    "Direct mistral parse test: content={:?}, tool_calls_count={}, normal_text={:?}",
+                    test_content,
+                    tool_calls.len(),
+                    normal_text
+                );
             }
             Err(e) => {
-                tracing::debug!("Direct mistral parse test failed: content={:?}, error={:?}", test_content, e);
+                tracing::debug!(
+                    "Direct mistral parse test failed: content={:?}, error={:?}",
+                    test_content,
+                    e
+                );
             }
         }
 

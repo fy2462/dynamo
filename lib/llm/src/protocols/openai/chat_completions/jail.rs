@@ -137,7 +137,6 @@ impl ChoiceJailState {
                 .marker_matcher
                 .process_chunk(content, &self.partial_match_buffer);
 
-
             match match_result {
                 MatchResult::Complete {
                     prefix,
@@ -164,7 +163,6 @@ impl ChoiceJailState {
 
                     // Check if this already contains the end marker
                     let (should_end, split_pos) = jail_stream.should_end_jail(&full_content).await;
-
 
                     if should_end {
                         // Complete tool call found in this chunk
@@ -284,7 +282,6 @@ impl ChoiceJailState {
 
             let (should_end, split_pos) =
                 jail_stream.should_end_jail(&self.accumulated_content).await;
-
 
             if should_end {
                 tracing::debug!(
@@ -638,7 +635,10 @@ impl JailedStream {
 
         tracing::debug!(
             "should_start_jail: content={:?}, sequence_match={}, tool_call_match={}, sequences={:?}",
-            content, sequence_match, tool_call_match, self.jail_start_sequences
+            content,
+            sequence_match,
+            tool_call_match,
+            self.jail_start_sequences
         );
 
         sequence_match || tool_call_match
@@ -740,8 +740,7 @@ impl JailedStream {
                     let result = !tool_calls.is_empty();
                     return result;
                 }
-                Err(_e) => {
-                }
+                Err(_e) => {}
             }
         }
         false

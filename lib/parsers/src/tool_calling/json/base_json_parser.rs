@@ -31,7 +31,6 @@ fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) ->
     let escaped_end = regex::escape(end_token);
     let pattern = format!(r"{}(.*?){}", escaped_start, escaped_end);
 
-
     match RegexBuilder::new(&pattern)
         .dot_matches_new_line(true)
         .build()
@@ -57,9 +56,7 @@ fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) ->
             }
             None
         }
-        Err(_e) => {
-            None
-        }
+        Err(_e) => None,
     }
 }
 
@@ -151,10 +148,7 @@ fn try_parse_normal_text(input: &str, start_token: &str) -> String {
 /// Try to parse a malformed JSON array and extract valid entries
 /// This function handles cases where some entries in a JSON array are malformed
 /// but others are valid and should be extracted
-fn try_parse_malformed_array<F>(
-    json: &str,
-    parse_fn: &F,
-) -> anyhow::Result<Vec<ToolCallResponse>>
+fn try_parse_malformed_array<F>(json: &str, parse_fn: &F) -> anyhow::Result<Vec<ToolCallResponse>>
 where
     F: Fn(String, HashMap<String, Value>) -> anyhow::Result<ToolCallResponse>,
 {
@@ -166,7 +160,7 @@ where
         return Ok(results);
     }
 
-    let inner = &inner[1..inner.len()-1].trim();
+    let inner = &inner[1..inner.len() - 1].trim();
 
     // Try to split by commas, but be smart about nested objects
     let mut entries = Vec::new();
@@ -513,7 +507,8 @@ pub fn try_tool_call_parse_basic_json(
         let mut results = Vec::new();
         for item in list {
             // Normalize escape sequences inside arguments strings directly in the map
-            let mut normalized_args: HashMap<String, Value> = HashMap::with_capacity(item.arguments.len());
+            let mut normalized_args: HashMap<String, Value> =
+                HashMap::with_capacity(item.arguments.len());
             for (k, mut v) in item.arguments.into_iter() {
                 normalize_json_string_escapes(&mut v);
                 normalized_args.insert(k, v);
@@ -798,5 +793,3 @@ mod detect_parser_tests {
         );
     }
 }
-
-
