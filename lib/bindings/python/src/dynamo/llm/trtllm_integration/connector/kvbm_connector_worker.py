@@ -11,8 +11,18 @@ from dynamo.llm.trtllm_integration.rust import (
 )
 from dynamo.runtime import DistributedRuntime
 
-
 class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
+
+    def _callable_object(self) -> callable:
+        assert self._connector is not None, "Expected cache connector worker to have non-None _connector obj"
+        assert self.event is not None, "Expected cache connector worker to have non-None event obj"
+        def callback():
+            self.event.record()
+            self.event.synchronize()
+            self._connector.execute_offload_operations()
+
+        return callback
+
     def __init__(self, llm_args: TorchLlmArgs):
         super().__init__(llm_args)
 
@@ -22,7 +32,19 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         self.rank = mappings.rank
 
         self._connector = RustKvConnectorWorker(self.drt, str(self.rank))
+        self.event = torch.cuda.Event()
 
+        # Default to old way of processing offload
+        self.use_forward_pass_callable = False
+
+    def register_forward_pass_callable(self) -> callable:
+        """
+        Register a callable object which will be called at the
+        end of the forward pass.
+        """
+        self.use_forward_pass_callable = True
+        return self._callable_object()
+    
     def register_kv_caches(self, kv_cache_tensor: torch.Tensor):
         """
         Register the KV cache tensors to the worker.
@@ -30,7 +52,6 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         Args:
             kv_cache_tensor: The contiguous KV cache tensor.
         """
-        print(f"Register KV Caches on rank {self.rank}")
         logger.info(
             f"KvConnectorWorker started registering the kv caches on rank {self.rank}"
         )
@@ -104,8 +125,10 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
             layer_idx: The index of the layer to save.
             stream: The stream the forward pass is being executed on.
         """
-        self.events[layer_idx].record(stream)
-        self._connector.save_kv_layer(layer_idx)
+        # This is a WAR to not collide with registering a forward_pass_callable
+        if not self.use_forward_pass_callable:
+            self.events[layer_idx].record(stream)
+            self._connector.save_kv_layer(layer_idx)
 
     def get_finished(
         self, finished_gen_req_ids: list[int], started_loading_req_ids: list[int]
