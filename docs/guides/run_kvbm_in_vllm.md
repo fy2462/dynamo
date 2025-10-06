@@ -43,6 +43,10 @@ export DYN_KVBM_CPU_CACHE_GB=4
 # 8 means 8GB of disk would be used
 export DYN_KVBM_DISK_CACHE_GB=8
 
+# enable disk zerofill fallback for KVBM
+# set to true to enable fallback behavior when disk operations fail
+export DYN_KVBM_DISK_ZEROFILL_FALLBACK=true
+
 # [DYNAMO] start dynamo frontend
 python -m dynamo.frontend --http-port 8000 &
 
