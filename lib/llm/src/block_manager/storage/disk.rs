@@ -39,6 +39,10 @@ fn allocate_file(fd: RawFd, size: u64) -> anyhow::Result<()> {
             nix::errno::Errno::EOPNOTSUPP => {
                 let do_zero_fill = std::env::var(DISK_ZEROFILL_FALLBACK_KEY).is_ok();
                 if do_zero_fill {
+                    tracing::warn!(
+                        "fallocate() not supported on this filesystem, using zero-fill fallback. \
+                         This may be slower but provides actual disk space allocation."
+                    );
                     // optional fallback: append zeros until reaching size
                     let mut written = 0;
                     let zeros = vec![0u8; ZERO_BUF_SIZE];
@@ -55,6 +59,12 @@ fn allocate_file(fd: RawFd, size: u64) -> anyhow::Result<()> {
                     file.flush().context("flush error")?;
                     Ok(())
                 } else {
+                    tracing::warn!(
+                        "fallocate() not supported on this filesystem, using truncate fallback. \
+                         This may may not actually allocate disk space. \
+                         Consider setting {}=true for slower zero-fill fallback.",
+                        DISK_ZEROFILL_FALLBACK_KEY
+                    );
                     // default fallback: set file length without zero-filling (does not really
                     // allocate)
                     ftruncate(fd, size as i64).context("truncate error")
