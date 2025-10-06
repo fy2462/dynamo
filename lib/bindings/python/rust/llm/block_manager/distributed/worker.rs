@@ -4,13 +4,49 @@
 use super::*;
 
 use std::sync::Arc;
-use utils::get_barrier_id;
+use utils::get_barrier_id_prefix;
 
 use llm_rs::block_manager::distributed::{
     BlockTransferHandler as RustBlockTransferHandler, KvbmWorker as KvbmWorkerImpl,
     KvbmWorkerConfig,
 };
+use llm_rs::block_manager::layout::LayoutType;
 use llm_rs::block_manager::storage::torch::{TorchDevice, TorchTensor};
+
+/// A wrapper around a layout type.
+/// This is used to convert between the Python and Rust layout types.
+#[pyclass(eq, eq_int)]
+#[derive(Clone, PartialEq, Eq)]
+pub enum PyLayoutType {
+    FullyContiguous,
+    LayerSeparate,
+}
+
+#[pymethods]
+impl PyLayoutType {
+    /// String representation of the layout type
+    fn __str__(&self) -> &'static str {
+        match self {
+            PyLayoutType::FullyContiguous => "FullyContiguous",
+            PyLayoutType::LayerSeparate => "LayerSeparate",
+        }
+    }
+
+    /// Representation for debugging
+    fn __repr__(&self) -> String {
+        format!("PyLayoutType.{}", self.__str__())
+    }
+}
+
+impl From<PyLayoutType> for LayoutType {
+    fn from(py_layout: PyLayoutType) -> Self {
+        match py_layout {
+            PyLayoutType::FullyContiguous => LayoutType::FullyContiguous,
+            // Layout (outer_contiguous vs block_contiguous) is auto-detected from tensor shapes
+            PyLayoutType::LayerSeparate => LayoutType::layer_separate_auto_default(),
+        }
+    }
+}
 
 /// A wrapper around a Torch tensor.
 /// We hold onto the py object to ensure it doesn't get GCed.
@@ -107,7 +143,7 @@ impl KvbmWorker {
 #[pymethods]
 impl KvbmWorker {
     #[new]
-    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, dtype_width_bytes=2, drt=None))]
+    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, dtype_width_bytes=2, drt=None, layout_blocking=false, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
     fn new(
         num_device_blocks: usize,
         page_size: usize,
@@ -115,6 +151,10 @@ impl KvbmWorker {
         device_id: usize,
         dtype_width_bytes: usize,
         drt: Option<DistributedRuntime>,
+        layout_blocking: bool,
+        device_layout_type: Option<PyLayoutType>,
+        host_layout_type: Option<PyLayoutType>,
+        disk_layout_type: Option<PyLayoutType>,
     ) -> PyResult<Self> {
         let py_drt = drt.ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("DistributedRuntime (drt) must be provided")
@@ -131,7 +171,7 @@ impl KvbmWorker {
             vllm_tensors.push(Arc::new(vllm_tensor));
         }
 
-        let barrier_id = get_barrier_id();
+        let barrier_id_prefix = get_barrier_id_prefix();
 
         let config = KvbmWorkerConfig::builder()
             .drt(drt)
@@ -140,13 +180,28 @@ impl KvbmWorker {
             .tensors(vllm_tensors)
             .device_id(device_id)
             .dtype_width_bytes(dtype_width_bytes)
-            .barrier_id(barrier_id)
+            .barrier_id_prefix(barrier_id_prefix)
+            .device_layout_type(
+                device_layout_type
+                    .map(|py_layout| py_layout.into())
+                    .unwrap_or(LayoutType::FullyContiguous),
+            )
+            .host_layout_type(
+                host_layout_type
+                    .map(|py_layout| py_layout.into())
+                    .unwrap_or(LayoutType::FullyContiguous),
+            )
+            .disk_layout_type(
+                disk_layout_type
+                    .map(|py_layout| py_layout.into())
+                    .unwrap_or(LayoutType::FullyContiguous),
+            )
             .build()
             .map_err(to_pyerr)?;
 
         let worker = rt
             .block_on(async move {
-                let kvbm_worker = KvbmWorkerImpl::new(config).await?;
+                let kvbm_worker = KvbmWorkerImpl::new(config, layout_blocking).await?;
                 anyhow::Ok(kvbm_worker)
             })
             .map_err(to_pyerr)?;

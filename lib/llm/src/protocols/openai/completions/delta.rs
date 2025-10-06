@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::{protocols::common, types::TokenIdType};
@@ -19,13 +7,18 @@ use crate::{protocols::common, types::TokenIdType};
 impl NvCreateCompletionRequest {
     // put this method on the request
     // inspect the request to extract options
-    pub fn response_generator(&self) -> DeltaGenerator {
+    pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
         let options = DeltaGeneratorOptions {
-            enable_usage: true,
+            enable_usage: self
+                .inner
+                .stream_options
+                .as_ref()
+                .map(|opts| opts.include_usage)
+                .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(0) > 0,
         };
 
-        DeltaGenerator::new(self.inner.model.clone(), options)
+        DeltaGenerator::new(self.inner.model.clone(), options, request_id)
     }
 }
 
@@ -47,7 +40,7 @@ pub struct DeltaGenerator {
 }
 
 impl DeltaGenerator {
-    pub fn new(model: String, options: DeltaGeneratorOptions) -> Self {
+    pub fn new(model: String, options: DeltaGeneratorOptions, request_id: String) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -67,8 +60,10 @@ impl DeltaGenerator {
             prompt_tokens_details: None,
         };
 
+        let completion_id = format!("cmpl-{request_id}");
+
         Self {
-            id: format!("cmpl-{}", uuid::Uuid::new_v4()),
+            id: completion_id,
             object: "text_completion".to_string(),
             created: now,
             model,
@@ -153,11 +148,9 @@ impl DeltaGenerator {
     ) -> NvCreateCompletionResponse {
         // todo - update for tool calling
 
-        let mut usage = self.usage.clone();
-        if self.options.enable_usage {
-            usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
-        }
-
+        // According to OpenAI spec: when stream_options.include_usage is true,
+        // all intermediate chunks should have usage: null
+        // The final usage chunk will be sent separately with empty choices
         let inner = dynamo_async_openai::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
@@ -170,14 +163,37 @@ impl DeltaGenerator {
                 finish_reason,
                 logprobs,
             }],
-            usage: if self.options.enable_usage {
-                Some(usage)
-            } else {
-                None
-            },
+            usage: None, // Always None for chunks with content/choices
         };
 
         NvCreateCompletionResponse { inner }
+    }
+
+    /// Creates a final usage-only chunk for OpenAI compliance.
+    /// This should be sent after the last content chunk when stream_options.include_usage is true.
+    ///
+    /// # Returns
+    /// * A [`NvCreateCompletionResponse`] with empty choices and usage stats.
+    pub fn create_usage_chunk(&self) -> NvCreateCompletionResponse {
+        let mut usage = self.usage.clone();
+        usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+
+        let inner = dynamo_async_openai::types::CreateCompletionResponse {
+            id: self.id.clone(),
+            object: self.object.clone(),
+            created: self.created,
+            model: self.model.clone(),
+            system_fingerprint: self.system_fingerprint.clone(),
+            choices: vec![], // Empty choices for usage-only chunk
+            usage: Some(usage),
+        };
+
+        NvCreateCompletionResponse { inner }
+    }
+
+    /// Check if usage tracking is enabled
+    pub fn is_usage_enabled(&self) -> bool {
+        self.options.enable_usage
     }
 }
 
@@ -216,5 +232,13 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
     fn get_isl(&self) -> Option<u32> {
         Some(self.usage.prompt_tokens)
+    }
+
+    fn create_usage_chunk(&self) -> NvCreateCompletionResponse {
+        DeltaGenerator::create_usage_chunk(self)
+    }
+
+    fn is_usage_enabled(&self) -> bool {
+        DeltaGenerator::is_usage_enabled(self)
     }
 }

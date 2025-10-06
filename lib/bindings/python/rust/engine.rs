@@ -1,19 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
-use super::context::{callable_accepts_kwarg, PyContext};
+use super::context::{Context, callable_accepts_kwarg};
+use dynamo_runtime::logging::get_distributed_tracing_context;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::{PyAny, PyErr};
@@ -21,15 +10,15 @@ use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 
 pub use dynamo_runtime::{
+    CancellationToken, Error, Result,
     pipeline::{
-        async_trait, AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream,
-        SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream, SingleIn,
+        async_trait,
     },
     protocols::annotated::Annotated,
-    CancellationToken, Error, Result,
 };
 pub use serde::{Deserialize, Serialize};
 
@@ -114,7 +103,7 @@ pub struct PythonServerStreamingEngine {
     _cancel_token: CancellationToken,
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
-    has_pycontext: bool,
+    has_context: bool,
 }
 
 impl PythonServerStreamingEngine {
@@ -123,7 +112,7 @@ impl PythonServerStreamingEngine {
         generator: Arc<PyObject>,
         event_loop: Arc<PyObject>,
     ) -> Self {
-        let has_pycontext = Python::with_gil(|py| {
+        let has_context = Python::with_gil(|py| {
             let callable = generator.bind(py);
             callable_accepts_kwarg(py, callable, "context").unwrap_or(false)
         });
@@ -132,7 +121,7 @@ impl PythonServerStreamingEngine {
             _cancel_token: cancel_token,
             generator,
             event_loop,
-            has_pycontext,
+            has_context,
         }
     }
 }
@@ -167,6 +156,9 @@ where
         let id = context.id().to_string();
         tracing::trace!("processing request: {}", id);
 
+        // Capture current trace context
+        let current_trace_context = get_distributed_tracing_context();
+
         // Clone the PyObject to move into the thread
 
         // Create a channel to communicate between the Python thread and the Rust async context
@@ -175,7 +167,7 @@ where
         let generator = self.generator.clone();
         let event_loop = self.event_loop.clone();
         let ctx_python = ctx.clone();
-        let has_pycontext = self.has_pycontext;
+        let has_context = self.has_context;
 
         // Acquiring the GIL is similar to acquiring a standard lock/mutex
         // Performing this in an tokio async task could block the thread for an undefined amount of time
@@ -190,9 +182,11 @@ where
         let stream = tokio::task::spawn_blocking(move || {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
-                let py_ctx = Py::new(py, PyContext::new(ctx_python.clone()))?;
 
-                let gen = if has_pycontext {
+                // Create context with trace information
+                let py_ctx = Py::new(py, Context::new(ctx_python.clone(), current_trace_context))?;
+
+                let gen_result = if has_context {
                     // Pass context as a kwarg
                     let kwarg = PyDict::new(py);
                     kwarg.set_item("context", &py_ctx)?;
@@ -203,7 +197,10 @@ where
                 }?;
 
                 let locals = TaskLocals::new(event_loop.bind(py).clone());
-                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(locals, gen.into_bound(py))
+                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(
+                    locals,
+                    gen_result.into_bound(py),
+                )
             })
         })
         .await??;
@@ -246,18 +243,27 @@ where
                                 // right now, this is impossible as we are not passing the context to the python async generator
                                 // todo: add task-local context to the python async generator
                                 ctx.stop_generating();
-                                let msg = format!("critical error: invalid response object from python async generator; application-logic-mismatch: {}", e);
+                                let msg = format!(
+                                    "critical error: invalid response object from python async generator; application-logic-mismatch: {}",
+                                    e
+                                );
                                 msg
                             }
                             ResponseProcessingError::PyGeneratorExit(_) => {
                                 "Stream ended before generation completed".to_string()
                             }
                             ResponseProcessingError::PythonException(e) => {
-                                let msg = format!("a python exception was caught while processing the async generator: {}", e);
+                                let msg = format!(
+                                    "a python exception was caught while processing the async generator: {}",
+                                    e
+                                );
                                 msg
                             }
                             ResponseProcessingError::OffloadError(e) => {
-                                let msg = format!("critical error: failed to offload the python async generator to a new thread: {}", e);
+                                let msg = format!(
+                                    "critical error: failed to offload the python async generator to a new thread: {}",
+                                    e
+                                );
                                 msg
                             }
                         };

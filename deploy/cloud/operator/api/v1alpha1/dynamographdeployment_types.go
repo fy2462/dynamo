@@ -32,6 +32,10 @@ type DynamoGraphDeploymentSpec struct {
 	// DynamoGraph selects the graph (workflow/topology) to deploy. This must match
 	// a graph name packaged with the Dynamo archive.
 	DynamoGraph string `json:"dynamoGraph,omitempty"`
+	// PVCs defines a list of persistent volume claims that can be referenced by components.
+	// Each PVC must have a unique name that can be referenced in component specifications.
+	// +kubebuilder:validation:Optional
+	PVCs []PVC `json:"pvcs,omitempty"`
 	// Services allows per-service overrides of the component deployment settings.
 	// - key: name of the service defined by the DynamoComponent
 	// - value: overrides for that service
@@ -109,4 +113,14 @@ func (s *DynamoGraphDeployment) AddStatusCondition(condition metav1.Condition) {
 	}
 	// If no matching condition found, append the new one
 	s.Status.Conditions = append(s.Status.Conditions, condition)
+}
+
+// HasAnyMultinodeService reports whether any service in the graph is configured with more than one node.
+func (s *DynamoGraphDeployment) HasAnyMultinodeService() bool {
+	for _, svc := range s.Spec.Services {
+		if svc != nil && svc.GetNumberOfNodes() > 1 {
+			return true
+		}
+	}
+	return false
 }

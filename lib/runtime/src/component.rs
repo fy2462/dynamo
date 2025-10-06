@@ -107,6 +107,13 @@ impl Instance {
     pub fn id(&self) -> i64 {
         self.instance_id
     }
+    pub fn endpoint_id(&self) -> EndpointId {
+        EndpointId {
+            namespace: self.namespace.clone(),
+            component: self.component.clone(),
+            name: self.endpoint.clone(),
+        }
+    }
 }
 
 /// A [Component] a discoverable entity in the distributed runtime.
@@ -218,8 +225,8 @@ impl Component {
         &self.namespace
     }
 
-    pub fn name(&self) -> String {
-        self.name.clone()
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn labels(&self) -> &[(String, String)] {
@@ -273,13 +280,12 @@ impl Component {
     /// Add Prometheus metrics for this component's NATS service stats.
     ///
     /// Starts a background task that periodically requests service statistics from NATS
-    /// and updates the corresponding Prometheus metrics. The scraping interval is set to
-    /// approximately 873ms (MAX_DELAY_MS), which is arbitrary but any value less than a second
-    /// is fair game. This frequent scraping provides real-time service statistics updates.
+    /// and updates the corresponding Prometheus metrics. The first scrape happens immediately,
+    /// then subsequent scrapes occur at a fixed interval of 9.8 seconds (MAX_WAIT_MS),
+    /// which should be near or smaller than typical Prometheus scraping intervals to ensure
+    /// metrics are fresh when Prometheus collects them.
     pub fn start_scraping_nats_service_component_metrics(&self) -> Result<()> {
-        const NATS_TIMEOUT_AND_INITIAL_DELAY_MS: std::time::Duration =
-            std::time::Duration::from_millis(300);
-        const MAX_DELAY_MS: std::time::Duration = std::time::Duration::from_millis(873);
+        const MAX_WAIT_MS: std::time::Duration = std::time::Duration::from_millis(9800); // Should be <= Prometheus scrape interval
 
         // If there is another component with the same service name, this will fail.
         let component_metrics = ComponentNatsServerPrometheusMetrics::new(self)?;
@@ -308,8 +314,8 @@ impl Component {
         // By using the DRT's own runtime handle, we ensure the task runs in the
         // correct runtime that will persist for the lifetime of the component.
         c.drt().runtime().secondary().spawn(async move {
-            let timeout = NATS_TIMEOUT_AND_INITIAL_DELAY_MS;
-            let mut interval = tokio::time::interval(MAX_DELAY_MS);
+            let timeout = std::time::Duration::from_millis(500);
+            let mut interval = tokio::time::interval(MAX_WAIT_MS);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
@@ -326,6 +332,7 @@ impl Component {
                         m.reset_to_zeros();
                     }
                 }
+
                 interval.tick().await;
             }
         });
@@ -450,7 +457,7 @@ impl Endpoint {
     pub fn etcd_path(&self) -> EtcdPath {
         EtcdPath::new_endpoint(
             &self.component.namespace().name(),
-            &self.component.name(),
+            self.component.name(),
             &self.name,
         )
         .expect("Endpoint name and component name should be valid")
@@ -458,12 +465,15 @@ impl Endpoint {
 
     /// The fully path of an instance in etcd
     pub fn etcd_path_with_lease_id(&self, lease_id: i64) -> String {
-        let endpoint_root = self.etcd_root();
-        if self.is_static {
-            endpoint_root
-        } else {
-            format!("{endpoint_root}:{lease_id:x}")
-        }
+        format!("{INSTANCE_ROOT_PATH}/{}", self.unique_path(lease_id))
+    }
+
+    /// Full path of this endpoint with forward slash separators, including lease id
+    pub fn unique_path(&self, lease_id: i64) -> String {
+        let ns = self.component.namespace().name();
+        let cp = self.component.name();
+        let ep = self.name();
+        format!("{ns}/{cp}/{ep}/{lease_id:x}")
     }
 
     /// The endpoint as an EtcdPath object with lease ID
@@ -473,7 +483,7 @@ impl Endpoint {
         } else {
             EtcdPath::new_endpoint_with_lease(
                 &self.component.namespace().name(),
-                &self.component.name(),
+                self.component.name(),
                 &self.name,
                 lease_id,
             )

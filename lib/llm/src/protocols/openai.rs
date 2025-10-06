@@ -8,7 +8,7 @@ use super::{
     ContentProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
-use crate::protocols::openai::common_ext::CommonExtProvider;
+use crate::protocols::openai::common_ext::{CommonExtProvider, choose_with_deprecation};
 
 pub mod chat_completions;
 pub mod common_ext;
@@ -20,7 +20,8 @@ pub mod responses;
 pub mod validate;
 
 use validate::{
-    FREQUENCY_PENALTY_RANGE, PRESENCE_PENALTY_RANGE, TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
+    BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
+    TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -39,6 +40,12 @@ trait OpenAISamplingOptionsProvider {
     fn get_frequency_penalty(&self) -> Option<f32>;
 
     fn get_presence_penalty(&self) -> Option<f32>;
+
+    fn get_seed(&self) -> Option<i64>;
+
+    fn get_n(&self) -> Option<u8>;
+
+    fn get_best_of(&self) -> Option<u8>;
 
     fn nvext(&self) -> Option<&nvext::NvExt>;
 }
@@ -61,9 +68,17 @@ trait OpenAIStopConditionsProvider {
     /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
     /// CommonExt (root-level) takes precedence over NvExt.
     fn get_ignore_eos(&self) -> Option<bool> {
-        // Check common first (takes precedence), then fall back to nvext
-        self.get_common_ignore_eos()
-            .or_else(|| self.nvext().and_then(|nv| nv.ignore_eos))
+        choose_with_deprecation(
+            "ignore_eos",
+            self.get_common_ignore_eos().as_ref(),
+            self.nvext().and_then(|nv| nv.ignore_eos.as_ref()),
+        )
+    }
+
+    /// Get max_thinking_tokens from nvext
+    /// NOTE: This is currently a passthrough for future thinking budget implementation
+    fn get_max_thinking_tokens(&self) -> Option<u32> {
+        self.nvext().and_then(|nv| nv.max_thinking_tokens)
     }
 }
 
@@ -93,6 +108,17 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
                 .map_err(|e| anyhow::anyhow!("Error validating frequency_penalty: {}", e))?;
         let presence_penalty = validate_range(self.get_presence_penalty(), &PRESENCE_PENALTY_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating presence_penalty: {}", e))?;
+        let top_k = CommonExtProvider::get_top_k(self);
+        let repetition_penalty = CommonExtProvider::get_repetition_penalty(self);
+        let include_stop_str_in_output = CommonExtProvider::get_include_stop_str_in_output(self);
+        let seed = self.get_seed();
+        let n = validate_range(self.get_n(), &N_RANGE)
+            .map_err(|e| anyhow::anyhow!("Error validating n: {}", e))?;
+        let best_of = validate_range(self.get_best_of(), &BEST_OF_RANGE)
+            .map_err(|e| anyhow::anyhow!("Error validating best_of: {}", e))?;
+
+        let min_p = validate_range(CommonExtProvider::get_min_p(self), &MIN_P_RANGE)
+            .map_err(|e| anyhow::anyhow!("Error validating min_p: {}", e))?;
 
         if let Some(nvext) = self.nvext() {
             let greedy = nvext.greed_sampling.unwrap_or(false);
@@ -107,6 +133,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         let guided_regex = self.get_guided_regex();
         let guided_grammar = self.get_guided_grammar();
         let guided_choice = self.get_guided_choice();
+        let guided_whitespace_pattern = self.get_guided_whitespace_pattern();
 
         let guided_decoding = match common::GuidedDecodingOptions::from_optional(
             guided_json.cloned(),
@@ -114,6 +141,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             guided_choice,
             guided_grammar,
             guided_decoding_backend,
+            guided_whitespace_pattern,
         ) {
             Ok(options) => options,
             Err(e) => {
@@ -124,19 +152,20 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         };
 
         Ok(common::SamplingOptions {
-            n: None,
-            best_of: None,
+            n,
+            best_of,
             frequency_penalty,
             presence_penalty,
-            repetition_penalty: None,
+            repetition_penalty,
             temperature,
             top_p,
-            top_k: None,
-            min_p: None,
-            seed: None,
+            top_k,
+            min_p,
+            seed,
             use_beam_search: None,
             length_penalty: None,
             guided_decoding,
+            include_stop_str_in_output,
         })
     }
 }
@@ -146,6 +175,7 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let max_tokens = self.get_max_tokens();
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
+        let max_thinking_tokens = self.get_max_thinking_tokens();
 
         if let Some(stop) = &stop
             && stop.len() > 4
@@ -162,6 +192,7 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             stop,
             stop_token_ids_hidden: None,
             ignore_eos,
+            max_thinking_tokens,
         })
     }
 }
@@ -192,6 +223,12 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
 
     /// Gets the current prompt token count (Input Sequence Length).
     fn get_isl(&self) -> Option<u32>;
+
+    /// Creates a final usage-only chunk for OpenAI compliance.
+    fn create_usage_chunk(&self) -> ResponseType;
+
+    /// Check if usage tracking is enabled.
+    fn is_usage_enabled(&self) -> bool;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

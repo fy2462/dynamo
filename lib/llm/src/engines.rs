@@ -13,9 +13,6 @@ use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseSt
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 
-use crate::backend::ExecutionContext;
-use crate::preprocessor::PreprocessedRequest;
-use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse, prompt_to_string},
@@ -65,53 +62,9 @@ pub static TOKEN_ECHO_DELAY: LazyLock<Duration> = LazyLock::new(|| {
     Duration::from_millis(delay_ms)
 });
 
-/// Engine that accepts pre-processed requests and echos the tokens back as the response
-/// The response will include the full prompt template.
-/// Useful for testing pre-processing.
-struct EchoEngineCore {}
-pub fn make_engine_core() -> ExecutionContext {
-    Arc::new(EchoEngineCore {})
-}
-
-#[async_trait]
-impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for EchoEngineCore
-{
-    async fn generate(
-        &self,
-        incoming_request: SingleIn<PreprocessedRequest>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        let (request, context) = incoming_request.into_parts();
-        let ctx = context.context();
-
-        let output = stream! {
-            for tok in request.token_ids {
-                tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                yield delta_core(tok);
-            }
-            yield Annotated::from_data(LLMEngineOutput::stop());
-        };
-        Ok(ResponseStream::new(Box::pin(output), ctx))
-    }
-}
-
-fn delta_core(tok: u32) -> Annotated<LLMEngineOutput> {
-    let delta = LLMEngineOutput {
-        token_ids: vec![tok],
-        tokens: None,
-        text: None,
-        cum_log_probs: None,
-        log_probs: None,
-        top_logprobs: None,
-        finish_reason: None,
-        index: None,
-    };
-    Annotated::from_data(delta)
-}
-
 /// Engine that accepts un-preprocessed requests and echos the prompt back as the response
 /// Useful for testing ingress such as service-http.
-struct EchoEngineFull {}
+struct EchoEngine {}
 
 /// Validate Engine that verifies request data
 pub struct ValidateEngine<E> {
@@ -164,8 +117,8 @@ pub trait EmbeddingEngine: Send + Sync {
     ) -> Result<ManyOut<Annotated<NvCreateEmbeddingResponse>>, Error>;
 }
 
-pub fn make_engine_full() -> Arc<dyn StreamingEngine> {
-    let engine = EchoEngineFull {};
+pub fn make_echo_engine() -> Arc<dyn StreamingEngine> {
+    let engine = EchoEngine {};
     let data = EngineDispatcher::new(engine);
     Arc::new(data)
 }
@@ -176,16 +129,18 @@ impl
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
         Error,
-    > for EchoEngineFull
+    > for EchoEngine
 {
     async fn generate(
         &self,
         incoming_request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         let (request, context) = incoming_request.transfer(());
-        let mut deltas = request.response_generator();
         let ctx = context.context();
-        let req = request.inner.messages.into_iter().next_back().unwrap();
+        let mut deltas = request.response_generator(ctx.id().to_string());
+        let Some(req) = request.inner.messages.into_iter().next_back() else {
+            anyhow::bail!("Empty chat messages in request");
+        };
 
         let prompt = match req {
             dynamo_async_openai::types::ChatCompletionRequestMessage::User(user_msg) => {
@@ -223,15 +178,15 @@ impl
         SingleIn<NvCreateCompletionRequest>,
         ManyOut<Annotated<NvCreateCompletionResponse>>,
         Error,
-    > for EchoEngineFull
+    > for EchoEngine
 {
     async fn generate(
         &self,
         incoming_request: SingleIn<NvCreateCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         let (request, context) = incoming_request.transfer(());
-        let deltas = request.response_generator();
         let ctx = context.context();
+        let deltas = request.response_generator(ctx.id().to_string());
         let chars_string = prompt_to_string(&request.inner.prompt);
         let output = stream! {
             let mut id = 1;
@@ -256,7 +211,7 @@ impl
         SingleIn<NvCreateEmbeddingRequest>,
         ManyOut<Annotated<NvCreateEmbeddingResponse>>,
         Error,
-    > for EchoEngineFull
+    > for EchoEngine
 {
     async fn generate(
         &self,

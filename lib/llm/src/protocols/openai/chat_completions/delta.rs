@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_parsers::{ParserResult, ReasoningParser, ReasoningParserType, ReasoningParserWrapper};
-
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
+    local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{self},
     types::TokenIdType,
 };
@@ -13,16 +12,25 @@ use crate::{
 impl NvCreateChatCompletionRequest {
     /// Creates a [`DeltaGenerator`] instance based on the chat completion request.
     ///
+    /// # Arguments
+    /// * `request_id` - The request ID to use for the chat completion response ID.
+    ///
     /// # Returns
     /// * [`DeltaGenerator`] configured with model name and response options.
-    pub fn response_generator(&self) -> DeltaGenerator {
+    pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
         let options = DeltaGeneratorOptions {
-            enable_usage: true,
+            enable_usage: self
+                .inner
+                .stream_options
+                .as_ref()
+                .map(|opts| opts.include_usage)
+                .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
+            runtime_config: ModelRuntimeConfig::default(),
         };
 
-        DeltaGenerator::new(self.inner.model.clone(), options)
+        DeltaGenerator::new(self.inner.model.clone(), options, request_id)
     }
 }
 
@@ -33,6 +41,8 @@ pub struct DeltaGeneratorOptions {
     pub enable_usage: bool,
     /// Determines whether log probabilities should be included in the response.
     pub enable_logprobs: bool,
+
+    pub runtime_config: ModelRuntimeConfig,
 }
 
 /// Generates incremental chat completion responses in a streaming fashion.
@@ -55,10 +65,6 @@ pub struct DeltaGenerator {
     msg_counter: u64,
     /// Configuration options for response generation.
     options: DeltaGeneratorOptions,
-
-    /// Reasoning Parser object
-    /// This is used to parse reasoning content in the response.
-    reasoning_parser: ReasoningParserWrapper,
 }
 
 impl DeltaGenerator {
@@ -67,10 +73,11 @@ impl DeltaGenerator {
     /// # Arguments
     /// * `model` - The model name used for response generation.
     /// * `options` - Configuration options for enabling usage and log probabilities.
+    /// * `request_id` - The request ID to use for the chat completion response.
     ///
     /// # Returns
     /// * A new instance of [`DeltaGenerator`].
-    pub fn new(model: String, options: DeltaGeneratorOptions) -> Self {
+    pub fn new(model: String, options: DeltaGeneratorOptions, request_id: String) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -88,16 +95,10 @@ impl DeltaGenerator {
             completion_tokens_details: None,
         };
 
-        // Reasoning parser type
-        // This is hardcoded for now, but can be made configurable later.
-        // TODO: Make parser type configurable once front-end integration is determined
-        let reasoning_parser_type = ReasoningParserType::Basic;
-
-        // Reasoning parser wrapper
-        let reasoning_parser = reasoning_parser_type.get_reasoning_parser();
+        let chatcmpl_id = format!("chatcmpl-{request_id}");
 
         Self {
-            id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+            id: chatcmpl_id,
             object: "chat.completion.chunk".to_string(),
             created: now,
             model,
@@ -106,7 +107,6 @@ impl DeltaGenerator {
             usage,
             msg_counter: 0,
             options,
-            reasoning_parser,
         }
     }
 
@@ -121,7 +121,7 @@ impl DeltaGenerator {
     pub fn create_logprobs(
         &self,
         tokens: Vec<common::llm_backend::TokenType>,
-        token_ids: Vec<TokenIdType>,
+        token_ids: &[TokenIdType],
         logprobs: Option<common::llm_backend::LogProbs>,
         top_logprobs: Option<common::llm_backend::TopLogprobs>,
     ) -> Option<dynamo_async_openai::types::ChatChoiceLogprobs> {
@@ -132,7 +132,7 @@ impl DeltaGenerator {
         let toks = tokens
             .into_iter()
             .zip(token_ids)
-            .map(|(token, token_id)| (token.unwrap_or_default(), token_id))
+            .map(|(token, token_id)| (token.unwrap_or_default(), *token_id))
             .collect::<Vec<(String, TokenIdType)>>();
         let tok_lps = toks
             .iter()
@@ -183,15 +183,6 @@ impl DeltaGenerator {
         })
     }
 
-    fn create_reasoning_content(&mut self, text: Option<String>) -> Option<ParserResult> {
-        let text = text?;
-        let parser_result = self
-            .reasoning_parser
-            .parse_reasoning_streaming_incremental(&text);
-
-        Some(parser_result)
-    }
-
     /// Creates a choice within a chat completion response.
     ///
     /// # Arguments
@@ -210,14 +201,8 @@ impl DeltaGenerator {
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
         logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
     ) -> NvCreateChatCompletionStreamResponse {
-        let reasoning_parser_result = self.create_reasoning_content(text).unwrap_or_default();
-
-        let (normal_text, reasoning_content) = (
-            reasoning_parser_result.get_some_normal_text(),
-            reasoning_parser_result.get_some_reasoning(),
-        );
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-            content: normal_text,
+            content: text,
             function_call: None,
             tool_calls: None,
             role: if self.msg_counter == 0 {
@@ -226,7 +211,7 @@ impl DeltaGenerator {
                 None
             },
             refusal: None,
-            reasoning_content,
+            reasoning_content: None,
         };
 
         let choice = dynamo_async_openai::types::ChatChoiceStream {
@@ -238,11 +223,9 @@ impl DeltaGenerator {
 
         let choices = vec![choice];
 
-        let mut usage = self.usage.clone();
-        if self.options.enable_usage {
-            usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
-        }
-
+        // According to OpenAI spec: when stream_options.include_usage is true,
+        // all intermediate chunks should have usage: null
+        // The final usage chunk will be sent separately with empty choices
         dynamo_async_openai::types::CreateChatCompletionStreamResponse {
             id: self.id.clone(),
             object: self.object.clone(),
@@ -250,13 +233,35 @@ impl DeltaGenerator {
             model: self.model.clone(),
             system_fingerprint: self.system_fingerprint.clone(),
             choices,
-            usage: if self.options.enable_usage {
-                Some(usage)
-            } else {
-                None
-            },
+            usage: None, // Always None for chunks with content/choices
             service_tier: self.service_tier.clone(),
         }
+    }
+
+    /// Creates a final usage-only chunk for OpenAI compliance.
+    /// This should be sent after the last content chunk when stream_options.include_usage is true.
+    ///
+    /// # Returns
+    /// * A [`CreateChatCompletionStreamResponse`] with empty choices and usage stats.
+    pub fn create_usage_chunk(&self) -> NvCreateChatCompletionStreamResponse {
+        let mut usage = self.usage.clone();
+        usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+
+        dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            id: self.id.clone(),
+            object: self.object.clone(),
+            created: self.created,
+            model: self.model.clone(),
+            system_fingerprint: self.system_fingerprint.clone(),
+            choices: vec![], // Empty choices for usage-only chunk
+            usage: Some(usage),
+            service_tier: self.service_tier.clone(),
+        }
+    }
+
+    /// Check if usage tracking is enabled
+    pub fn is_usage_enabled(&self) -> bool {
+        self.options.enable_usage
     }
 }
 
@@ -292,7 +297,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         let logprobs = self.create_logprobs(
             delta.tokens,
-            delta.token_ids,
+            &delta.token_ids,
             delta.log_probs,
             delta.top_logprobs,
         );
@@ -327,5 +332,13 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
     fn get_isl(&self) -> Option<u32> {
         Some(self.usage.prompt_tokens)
+    }
+
+    fn create_usage_chunk(&self) -> NvCreateChatCompletionStreamResponse {
+        DeltaGenerator::create_usage_chunk(self)
+    }
+
+    fn is_usage_enabled(&self) -> bool {
+        DeltaGenerator::is_usage_enabled(self)
     }
 }

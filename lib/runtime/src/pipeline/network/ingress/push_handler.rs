@@ -1,19 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use super::*;
+use crate::metrics::prometheus_names::work_handler;
 use crate::protocols::maybe_error::MaybeError;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
@@ -59,40 +48,40 @@ impl WorkHandlerMetrics {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let metrics_labels = metrics_labels.unwrap_or(&[]);
         let request_counter = endpoint.create_intcounter(
-            "requests_total",
+            work_handler::REQUESTS_TOTAL,
             "Total number of requests processed by work handler",
             metrics_labels,
         )?;
 
         let request_duration = endpoint.create_histogram(
-            "request_duration_seconds",
+            work_handler::REQUEST_DURATION_SECONDS,
             "Time spent processing requests by work handler",
             metrics_labels,
             None,
         )?;
 
         let inflight_requests = endpoint.create_intgauge(
-            "inflight_requests",
+            work_handler::INFLIGHT_REQUESTS,
             "Number of requests currently being processed by work handler",
             metrics_labels,
         )?;
 
         let request_bytes = endpoint.create_intcounter(
-            "request_bytes_total",
+            work_handler::REQUEST_BYTES_TOTAL,
             "Total number of bytes received in requests by work handler",
             metrics_labels,
         )?;
 
         let response_bytes = endpoint.create_intcounter(
-            "response_bytes_total",
+            work_handler::RESPONSE_BYTES_TOTAL,
             "Total number of bytes sent in responses by work handler",
             metrics_labels,
         )?;
 
         let error_counter = endpoint.create_intcountervec(
-            "errors_total",
+            work_handler::ERRORS_TOTAL,
             "Total number of errors in work handler processing",
-            &["error_type"],
+            &[work_handler::ERROR_TYPE_LABEL],
             metrics_labels,
         )?;
 
@@ -137,6 +126,14 @@ where
         Ingress::add_metrics(self, endpoint, metrics_labels)
     }
 
+    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
+        use crate::pipeline::network::Ingress;
+        self.endpoint_health_check_notifier
+            .set(notifier)
+            .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
+        Ok(())
+    }
+
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
         let start_time = std::time::Instant::now();
 
@@ -172,7 +169,7 @@ where
                         let json_str = String::from_utf8_lossy(&header);
                         if let Some(m) = self.metrics() {
                             m.error_counter
-                                .with_label_values(&["deserialization"])
+                                .with_label_values(&[work_handler::error_types::DESERIALIZATION])
                                 .inc();
                         }
                         return Err(PipelineError::DeserializationError(format!(
@@ -186,7 +183,7 @@ where
             _ => {
                 if let Some(m) = self.metrics() {
                     m.error_counter
-                        .with_label_values(&["invalid_message"])
+                        .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
                         .inc();
                 }
                 return Err(PipelineError::Generic(String::from(
@@ -211,7 +208,7 @@ where
         .map_err(|e| {
             if let Some(m) = self.metrics() {
                 m.error_counter
-                    .with_label_values(&["response_stream"])
+                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
                     .inc();
             }
             PipelineError::Generic(format!("Failed to create response stream: {:?}", e,))
@@ -226,7 +223,9 @@ where
             .await
             .map_err(|e| {
                 if let Some(m) = self.metrics() {
-                    m.error_counter.with_label_values(&["generate"]).inc();
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::GENERATE])
+                        .inc();
                 }
                 PipelineError::GenerateError(e)
             });
@@ -265,13 +264,12 @@ where
         let mut send_complete_final = true;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
-            if let Some(err) = resp.err() {
-                const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
-                if format!("{:?}", err) == STREAM_ERR_MSG {
-                    tracing::warn!(STREAM_ERR_MSG);
-                    send_complete_final = false;
-                    break;
-                }
+            if let Some(err) = resp.err()
+                && format!("{:?}", err) == STREAM_ERR_MSG
+            {
+                tracing::warn!(STREAM_ERR_MSG);
+                send_complete_final = false;
+                break;
             }
             let resp_wrapper = NetworkStreamWrapper {
                 data: Some(resp),
@@ -288,7 +286,7 @@ where
                 send_complete_final = false;
                 if let Some(m) = self.metrics() {
                     m.error_counter
-                        .with_label_values(&["publish_response"])
+                        .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
                         .inc();
                 }
                 break;
@@ -310,8 +308,15 @@ where
                     context.id()
                 );
                 if let Some(m) = self.metrics() {
-                    m.error_counter.with_label_values(&["publish_final"]).inc();
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
+                        .inc();
                 }
+            }
+            // Notify the health check manager that the stream has finished.
+            // This resets the timer, delaying the next canary health check.
+            if let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                notifier.notify_one();
             }
         }
 

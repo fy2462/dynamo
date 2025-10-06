@@ -1,28 +1,60 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// PyContext is a wrapper around the AsyncEngineContext to allow for Python bindings.
+// Context is a wrapper around the AsyncEngineContext to allow for Python bindings.
 
+use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
+use dynamo_runtime::pipeline::context::Controller;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
-// PyContext is a wrapper around the AsyncEngineContext to allow for Python bindings.
+// Context is a wrapper around the AsyncEngineContext to allow for Python bindings.
 // Not all methods of the AsyncEngineContext are exposed, jsut the primary ones for tracing + cancellation.
 // Kept as class, to allow for future expansion if needed.
+#[derive(Clone)]
 #[pyclass]
-pub struct PyContext {
-    pub inner: Arc<dyn AsyncEngineContext>,
+pub struct Context {
+    inner: Arc<dyn AsyncEngineContext>,
+    trace_context: Option<DistributedTraceContext>,
 }
 
-impl PyContext {
-    pub fn new(inner: Arc<dyn AsyncEngineContext>) -> Self {
-        Self { inner }
+impl Context {
+    pub fn new(
+        inner: Arc<dyn AsyncEngineContext>,
+        trace_context: Option<DistributedTraceContext>,
+    ) -> Self {
+        Self {
+            inner,
+            trace_context,
+        }
+    }
+
+    // Get trace context for Rust-side usage
+    pub fn trace_context(&self) -> Option<&DistributedTraceContext> {
+        self.trace_context.as_ref()
+    }
+
+    pub fn inner(&self) -> Arc<dyn AsyncEngineContext> {
+        self.inner.clone()
     }
 }
 
 #[pymethods]
-impl PyContext {
+impl Context {
+    #[new]
+    #[pyo3(signature = (id=None))]
+    fn py_new(id: Option<String>) -> Self {
+        let controller = match id {
+            Some(id) => Controller::new(id),
+            None => Controller::default(),
+        };
+        Self {
+            inner: Arc::new(controller),
+            trace_context: None,
+        }
+    }
+
     // sync method of `await async_is_stopped()`
     fn is_stopped(&self) -> bool {
         self.inner.is_stopped()
@@ -55,6 +87,24 @@ impl PyContext {
                 }
             }
         })
+    }
+
+    // Expose trace information to Python for debugging
+    #[getter]
+    fn trace_id(&self) -> Option<String> {
+        self.trace_context.as_ref().map(|ctx| ctx.trace_id.clone())
+    }
+
+    #[getter]
+    fn span_id(&self) -> Option<String> {
+        self.trace_context.as_ref().map(|ctx| ctx.span_id.clone())
+    }
+
+    #[getter]
+    fn parent_span_id(&self) -> Option<String> {
+        self.trace_context
+            .as_ref()
+            .and_then(|ctx| ctx.parent_id.clone())
     }
 }
 

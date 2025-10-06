@@ -9,8 +9,11 @@ from typing import (
     Dict,
     List,
     Optional,
-    Union,
+    Tuple,
 )
+
+# Prometheus metric names are defined in a separate module
+from ._prometheus_names import prometheus_names
 
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
     """
@@ -40,9 +43,10 @@ class DistributedRuntime:
         """
         ...
 
-    def etcd_client(self) -> Optional[EtcdClient]:
+    def allocate_port_block(self, namespace, port_min, port_max, block_size, context=None) -> List[int]:
         """
-        Get the `EtcdClient` object. Not available for static workers.
+        Allocate a contiguous block of ports from the specified range and atomically reserve them.
+        Returns a list of all allocated ports in order.
         """
         ...
 
@@ -51,131 +55,26 @@ class DistributedRuntime:
         Shutdown the runtime by triggering the cancellation token
         """
         ...
-class EtcdClient:
-    """
-    Etcd is used for discovery in the DistributedRuntime
-    """
 
-    def primary_lease_id(self) -> int:
+    def child_token(self) -> CancellationToken:
         """
-        return the primary lease id.
+        Get a child cancellation token that can be passed to async tasks
         """
         ...
 
-    async def kv_create(
-        self, key: str, value: bytes, lease_id: Optional[int] = None
-    ) -> None:
+class CancellationToken:
+    def cancel(self) -> None:
         """
-        Atomically create a key in etcd, fail if the key already exists.
-        """
-        ...
-
-    async def kv_create_or_validate(
-        self, key: str, value: bytes, lease_id: Optional[int] = None
-    ) -> None:
-        """
-        Atomically create a key if it does not exist, or validate the values are identical if the key exists.
+        Cancel the token and all its children
         """
         ...
 
-    async def kv_put(
-        self, key: str, value: bytes, lease_id: Optional[int] = None
-    ) -> None:
+    async def cancelled(self) -> None:
         """
-        Put a key-value pair into etcd
+        Await until the token is cancelled
         """
         ...
 
-    async def kv_get_prefix(self, prefix: str) -> List[Dict[str, JsonLike]]:
-        """
-        Get all keys with a given prefix
-        """
-        ...
-
-    async def revoke_lease(self, lease_id: int) -> None:
-        """
-        Revoke a lease
-        """
-        ...
-
-class EtcdKvCache:
-    """
-    A cache for key-value pairs stored in etcd.
-    """
-
-    @staticmethod
-    async def new(
-        etcd_client: EtcdClient,
-        prefix: str,
-        initial_values: Dict[str, Union[str, bytes]]
-    ) -> "EtcdKvCache":
-        """
-        Create a new EtcdKvCache instance.
-
-        Args:
-            etcd_client: The etcd client to use for operations
-            prefix: The prefix to use for all keys in this cache.
-                EtcdKvCache will continuously watch the changes of the keys under this prefix.
-            initial_values: Initial key-value pairs to populate the cache with
-                NOTE: if the key already exists, it won't be updated
-
-        Returns:
-            A new EtcdKvCache instance
-        """
-        ...
-
-    async def get(self, key: str) -> Optional[bytes]:
-        """
-        Get a value from the cache.
-
-        Args:
-            key: The key to retrieve
-
-        Returns:
-            The value as bytes if found, None otherwise
-
-        NOTE: this get is cheap because internally there is a cache that holds the latest kv pairs.
-        To prevent race condition, there is a lock when reading/writing the internal cache.
-        """
-        ...
-
-    async def get_all(self) -> Dict[str, bytes]:
-        """
-        Get all key-value pairs from the cache.
-
-        Returns:
-            A dictionary of all key-value pairs, with keys stripped of the prefix
-            (i.e., in the same format as in `initial_values`.keys())
-        """
-        ...
-
-    async def put(
-        self,
-        key: str,
-        value: bytes,
-        lease_id: Optional[int] = None
-    ) -> None:
-        """
-        Put a key-value pair into the cache and etcd.
-
-        Args:
-            key: The key to store
-            value: The value to store
-            lease_id: Optional lease ID to associate with this key-value pair
-        """
-        ...
-
-    async def delete(self, key: str) -> None:
-        """
-        Delete a key-value pair from the cache and etcd.
-        """
-        ...
-
-    async def clear_all(self) -> None:
-        """
-        Delete all key-value pairs from the cache and etcd.
-        """
-        ...
 
 class Namespace:
     """
@@ -216,7 +115,7 @@ class Endpoint:
 
     ...
 
-    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True) -> None:
+    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
@@ -224,6 +123,9 @@ class Endpoint:
         Args:
             handler: The request handler function
             graceful_shutdown: Whether to wait for inflight requests to complete during shutdown (default: True)
+            metrics_labels: Optional list of metrics labels to add to the metrics
+            health_check_payload: Optional dict containing the health check request payload
+                                  that will be used to verify endpoint health
         """
         ...
 
@@ -245,6 +147,24 @@ class Client:
     """
 
     ...
+
+    def instance_ids(self) -> List[int]:
+        """
+        Get list of current instance IDs.
+
+        Returns:
+            A list of currently available instance IDs
+        """
+        ...
+
+    async def wait_for_instances(self) -> List[int]:
+        """
+        Wait for instances to be available for work and return their IDs.
+
+        Returns:
+            A list of instance IDs that are available for work
+        """
+        ...
 
     async def random(self, request: JsonLike) -> AsyncIterator[JsonLike]:
         """
@@ -330,6 +250,93 @@ def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List
     """
 
     ...
+
+class Context:
+    """
+    Context wrapper around AsyncEngineContext for Python bindings.
+    Provides tracing and cancellation capabilities for request handling.
+    """
+
+    def __init__(self, id: Optional[str] = None) -> None:
+        """
+        Create a new Context instance.
+
+        Args:
+            id: Optional request ID. If None, a default ID will be generated.
+        """
+        ...
+
+    def is_stopped(self) -> bool:
+        """
+        Check if the context has been stopped (synchronous).
+
+        Returns:
+            True if the context is stopped, False otherwise.
+        """
+        ...
+
+    def is_killed(self) -> bool:
+        """
+        Check if the context has been killed (synchronous).
+
+        Returns:
+            True if the context is killed, False otherwise.
+        """
+        ...
+
+    def stop_generating(self) -> None:
+        """
+        Issue a stop generating signal to the context.
+        """
+        ...
+
+    def id(self) -> Optional[str]:
+        """
+        Get the context ID.
+
+        Returns:
+            The context identifier string, or None if not set.
+        """
+        ...
+
+    async def async_killed_or_stopped(self) -> bool:
+        """
+        Asynchronously wait until the context is killed or stopped.
+
+        Returns:
+            True when the context is killed or stopped.
+        """
+        ...
+
+    @property
+    def trace_id(self) -> Optional[str]:
+        """
+        Get the distributed trace ID if available.
+
+        Returns:
+            The trace ID string, or None if no trace context.
+        """
+        ...
+
+    @property
+    def span_id(self) -> Optional[str]:
+        """
+        Get the distributed span ID if available.
+
+        Returns:
+            The span ID string, or None if no trace context.
+        """
+        ...
+
+    @property
+    def parent_span_id(self) -> Optional[str]:
+        """
+        Get the parent span ID if available.
+
+        Returns:
+            The parent span ID string, or None if no trace context.
+        """
+        ...
 
 class WorkerStats:
     """
@@ -420,7 +427,7 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    def create_endpoint(self, component: Component) -> None:
+    def create_endpoint(self, component: Component, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
         """
         Similar to Component.create_service, but only service created through
         this method will interact with KV router of the same component.
@@ -807,13 +814,6 @@ class HttpService:
 
     ...
 
-class HttpError:
-    """
-    An error that occurred in the HTTP service
-    """
-
-    ...
-
 class HttpAsyncEngine:
     """
     An async engine for a distributed Dynamo http service. This is an extension of the
@@ -823,8 +823,12 @@ class HttpAsyncEngine:
 
     ...
 
+class ModelInput:
+    """What type of request this model needs: Text, Tokens or Tensor"""
+    ...
+
 class ModelType:
-    """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
+    """What type of request this model needs: Chat, Completions, Embedding or Tensor"""
     ...
 
 class RouterMode:
@@ -839,7 +843,19 @@ class KvRouterConfig:
     """Values for KV router"""
     ...
 
-async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None) -> None:
+async def register_llm(
+    model_input: ModelInput,
+    model_type: ModelType,
+    endpoint: Endpoint,
+    model_path: str,
+    model_name: Optional[str] = None,
+    context_length: Optional[int] = None,
+    kv_cache_block_size: Optional[int] = None,
+    migration_limit: int = 0,
+    router_mode: Optional[RouterMode] = None,
+    user_data: Optional[Dict[str, Any]] = None,
+    custom_template_path: Optional[str] = None,
+) -> None:
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
 
@@ -854,71 +870,6 @@ async def make_engine(args: EntrypointArgs) -> EngineConfig:
 async def run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig) -> None:
     """Start an engine, connect it to an input, and run until stopped."""
     ...
-
-class NatsQueue:
-    """
-    A queue implementation using NATS JetStream for task distribution
-    """
-
-    def __init__(self, stream_name: str, nats_server: str, dequeue_timeout: float) -> None:
-        """
-        Create a new NatsQueue instance.
-
-        Args:
-            stream_name: Name of the NATS JetStream stream
-            nats_server: URL of the NATS server
-            dequeue_timeout: Default timeout in seconds for dequeue operations
-        """
-        ...
-
-    async def connect(self) -> None:
-        """
-        Connect to the NATS server
-        """
-        ...
-
-    async def ensure_connection(self) -> None:
-        """
-        Ensure connection to the NATS server, connecting if not already connected
-        """
-        ...
-
-    async def close(self) -> None:
-        """
-        Close the connection to the NATS server
-        """
-        ...
-
-    async def enqueue_task(self, task_data: bytes) -> None:
-        """
-        Enqueue a task to the NATS JetStream
-
-        Args:
-            task_data: The task data as bytes
-        """
-        ...
-
-    async def dequeue_task(self, timeout: Optional[float] = None) -> Optional[bytes]:
-        """
-        Dequeue a task from the NATS JetStream
-
-        Args:
-            timeout: Optional timeout in seconds for this specific dequeue operation.
-                    If None, uses the default timeout specified during initialization.
-
-        Returns:
-            The task data as bytes if available, None if no task is available
-        """
-        ...
-
-    async def get_queue_size(self) -> int:
-        """
-        Get the current size of the queue
-
-        Returns:
-            The number of messages in the queue
-        """
-        ...
 
 class Layer:
     """
@@ -1178,6 +1129,107 @@ class ZmqKvEventListener:
         """
         ...
 
+class KvPushRouter:
+    """
+    A KV-aware push router that performs intelligent routing based on KV cache overlap.
+    """
+
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        block_size: int,
+        kv_router_config: KvRouterConfig,
+    ) -> None:
+        """
+        Create a new KvPushRouter instance.
+
+        Args:
+            endpoint: The endpoint to connect to for routing requests
+            block_size: The KV cache block size
+            kv_router_config: Configuration for the KV router
+        """
+        ...
+
+    async def generate(
+        self,
+        token_ids: List[int],
+        model: str,
+        stop_conditions: Optional[JsonLike] = None,
+        sampling_options: Optional[JsonLike] = None,
+        output_options: Optional[JsonLike] = None,
+        router_config_override: Optional[JsonLike] = None,
+        worker_id: Optional[int] = None,
+    ) -> AsyncIterator[JsonLike]:
+        """
+        Generate text using the KV-aware router.
+
+        Args:
+            token_ids: Input token IDs
+            model: Model name to use for generation
+            stop_conditions: Optional stop conditions for generation
+            sampling_options: Optional sampling configuration
+            output_options: Optional output configuration
+            router_config_override: Optional router configuration override
+            worker_id: Optional worker ID to route to directly. If set, the request
+                      will be sent to this specific worker and router states will be
+                      updated accordingly.
+
+        Returns:
+            An async iterator yielding generation responses
+
+        Note:
+            - If worker_id is set, the request bypasses KV matching and routes directly
+              to the specified worker while still updating router states.
+            - This is different from query_instance_id which doesn't route the request.
+        """
+        ...
+
+    async def best_worker_id(
+        self,
+        token_ids: List[int],
+        router_config_override: Optional[JsonLike] = None,
+    ) -> Tuple[int, int]:
+        """
+        Find the best matching worker for the given tokens without updating states.
+
+        Args:
+            token_ids: List of token IDs to find matches for
+            router_config_override: Optional router configuration override
+
+        Returns:
+            A tuple of (worker_id, overlap_blocks) where:
+                - worker_id: The ID of the best matching worker
+                - overlap_blocks: The number of overlapping blocks found
+        """
+        ...
+
+    async def get_potential_loads(
+        self,
+        token_ids: List[int],
+    ) -> List[Dict[str, int]]:
+        """
+        Get potential prefill and decode loads for all workers.
+
+        Args:
+            token_ids: List of token IDs to evaluate
+
+        Returns:
+            A list of dictionaries, each containing:
+                - worker_id: The worker ID
+                - potential_prefill_tokens: Number of tokens that would need prefill
+                - potential_decode_blocks: Number of blocks currently in decode phase
+        """
+        ...
+
+    async def dump_events(self) -> str:
+        """
+        Dump all events from the KV router's indexer.
+
+        Returns:
+            A JSON string containing all indexer events
+        """
+        ...
+
 class EntrypointArgs:
     """
     Settings to connect an input to a worker and run them.
@@ -1185,3 +1237,52 @@ class EntrypointArgs:
     """
 
     ...
+
+class PlannerDecision:
+    """A request from planner to client to perform a scaling action.
+    Fields: num_prefill_workers, num_decode_workers, decision_id.
+            -1 in any of those fields mean not set, usually because planner hasn't decided anything yet.
+    Call VirtualConnectorClient.complete(event) when action is completed.
+    """
+    ...
+
+class VirtualConnectorCoordinator:
+    """Internal planner virtual connector component"""
+
+    def __init__(self, runtime: DistributedRuntime, dynamo_namespace: str, check_interval_secs: int, max_wait_time_secs: int, max_retries: int) -> None:
+        ...
+
+    async def async_init(self) -> None:
+        """Call this before using the object"""
+        ...
+
+    def read_state(self) -> PlannerDecision:
+        """Get the current values. Most for test / debug."""
+        ...
+
+    async def update_scaling_decision(self, num_prefill: Optional[int] = None, num_decode: Optional[int] = None) -> None:
+        ...
+
+    async def wait_for_scaling_completion(self) -> None:
+        ...
+
+class VirtualConnectorClient:
+    """How a client discovers planner requests and marks them complete"""
+
+    def __init__(self, runtime: DistributedRuntime, dynamo_namespace: str) -> None:
+        ...
+
+    async def get(self) -> PlannerDecision:
+        ...
+
+    async def complete(self, decision: PlannerDecision) -> None:
+        ...
+
+    async def wait(self) -> None:
+        """Blocks until there is a new decision to fetch using 'get'"""
+        ...
+
+__all__ = [
+    # ... existing exports ...
+    "prometheus_names"
+]

@@ -5,10 +5,10 @@ use std::{any::Any, sync::Arc};
 
 use dynamo_llm::{
     block_manager::{
-        block::{locality::LocalityProvider, BlockMetadata},
+        Storage,
+        block::{BlockMetadata, locality::LocalityProvider},
         connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
         distributed::{BlockTransferPool, BlockTransferRequest, KvbmLeader},
-        Storage,
     },
     tokens::TokenBlock,
 };
@@ -106,6 +106,18 @@ pub trait Slot: std::fmt::Debug {
         num_scheduled_tokens: usize,
     ) -> Result<(), SlotError>;
 
+    // TRT-LLM does not include scheduled tokens in the scheduler output.
+    // Ideally, we should have a dedicated implementation for the TRT-LLM slot.
+    // However, since only this single function needs to be rewritten for now,
+    // we keep it as a separate function in Slot.
+    fn apply_scheduler_output_with_computed_position(
+        &mut self,
+        tokens: &[u32],
+        block_ids: &[usize],
+        computed_position: usize,
+        is_new_request: bool,
+    ) -> Result<(), SlotError>;
+
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError>;
 
     fn mark_as_prefilling(&mut self, iteration: u64) -> Result<(), SlotError>;
@@ -197,7 +209,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
             |cancellation_token| async move {
                 xfer_engine
-                    .execute(cancellation_token, drt_for_task, kvbm_metrics.clone())
+                    .execute(cancellation_token, drt_for_task, kvbm_metrics)
                     .await
             },
             primary_token,
@@ -228,6 +240,11 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
         tokens: Vec<u32>,
         salt_hash: SaltHash,
     ) -> Result<(), SlotError> {
+        tracing::debug!(
+            "creating slot with request_id: {}, num_tokens: {}",
+            request_id,
+            tokens.len()
+        );
         let slot = VllmConnectorSlot::new(
             request_id.to_string(),
             tokens.into(),
@@ -382,7 +399,11 @@ impl VllmConnectorSlot {
             SlotState::SkippedPrefill => Ok(()), // already skipped
             SlotState::SkippedDecode => Ok(()),  // already skipped
             _ => {
-                tracing::warn!("slot is in the {:?} state; will not explicitly mark as skipped, request_id: {}", self.state, self.request_id);
+                tracing::debug!(
+                    "slot is in the {:?} state; will not explicitly mark as skipped, request_id: {}",
+                    self.state,
+                    self.request_id
+                );
                 Ok(())
             }
         }
@@ -566,6 +587,111 @@ impl Slot for VllmConnectorSlot {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = self.request_id.as_str()))]
+    fn apply_scheduler_output_with_computed_position(
+        &mut self,
+        tokens: &[u32],
+        block_ids: &[usize],
+        computed_position: usize,
+        is_new_request: bool,
+    ) -> Result<(), SlotError> {
+        // TRTLLM's KV Connector Manager will have (computed_position - external matches)
+        // in onborading case
+        if computed_position < self.current_position {
+            tracing::debug!(
+                "computed_position={} < current_position={}, so we are onboarding during prefilling phase",
+                computed_position,
+                self.current_position
+            );
+            return Ok(());
+        }
+
+        // now we decide what we should do for the new computed tokens
+        tracing::debug!(
+            "applying scheduler output, computed_position={}, sequence_total_tokens={}",
+            computed_position,
+            self.sequence.total_tokens()
+        );
+
+        if computed_position < self.sequence.total_tokens() {
+            // no need to apply new tokens, since it's applied when created the slot during prefilling
+            self.state = SlotState::Prefilling;
+        } else {
+            tracing::debug!(
+                "appending {} newly decoded tokens to sequence",
+                tokens.len()
+            );
+            self.sequence.extend(tokens.into()).unwrap();
+            self.state = SlotState::Decoding;
+        }
+
+        // apply new block_ids, this should be applied for both prefilling and decoding
+        // because this is unknown when creating the slot
+        if !block_ids.is_empty() {
+            tracing::debug!("assigning {} new device blocks slot", block_ids.len());
+            self.device_blocks.extend(block_ids);
+        }
+
+        // This approach is fragile, but it’s the only way currently to skip evaluating
+        // the device matched blocks and to avoid offloading them again.
+        // TODO: Consider adding an indicator in the scheduler output to distinguish between
+        // matched and unmatched device blocks/tokens from the scheduler.
+        let maybe_have_device_matched_blocks =
+            is_new_request && computed_position > 0 && self.evaluated_blocks == 0;
+
+        if maybe_have_device_matched_blocks {
+            self.evaluated_blocks = (computed_position + 1) / self.block_size;
+        }
+
+        let num_candidate_blocks =
+            ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
+
+        if num_candidate_blocks > 0 {
+            // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
+            // for now, offload all the blocks to the host
+            let offload_block_ids: Vec<usize> = self
+                .device_blocks
+                .iter()
+                .skip(self.evaluated_blocks)
+                .take(num_candidate_blocks)
+                .copied()
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                offload_block_ids.len(),
+                num_candidate_blocks,
+                "device block overflow - candidate blocks exceed block count at offset {}",
+                self.evaluated_blocks
+            );
+
+            let offload_token_blocks: Vec<TokenBlock> = self
+                .sequence
+                .blocks()
+                .iter()
+                .skip(self.evaluated_blocks)
+                .take(num_candidate_blocks)
+                .cloned()
+                .collect::<Vec<_>>();
+
+            self.offload_blocks(&offload_block_ids, &offload_token_blocks)
+                .expect("failed to offload blocks");
+
+            self.evaluated_blocks += num_candidate_blocks;
+        }
+
+        // done applying policy
+        tracing::debug!(
+            "done applying kv cache policy at current_position: {}; computed_position: {}",
+            self.current_position,
+            computed_position,
+        );
+
+        // advance current position to computed position
+        self.current_position = computed_position;
+
+        Ok(())
+    }
+
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError> {
         if self.iteration_first_scheduled.is_none() {
             self.iteration_first_scheduled = Some(iteration);
@@ -676,7 +802,7 @@ impl Slot for VllmConnectorSlot {
         let num_matched_blocks = num_matched_host_blocks + num_matched_disk_blocks;
 
         tracing::debug!(
-            "matched {} host blocks and {} disk blocks; {} total blocks",
+            "successfully matched {} host blocks and {} disk blocks; {} total blocks",
             num_matched_host_blocks,
             num_matched_disk_blocks,
             num_matched_blocks
@@ -808,7 +934,8 @@ impl ExternallyManagedDeviceSlot for VllmConnectorSlot {
         if self.current_position + num_tokens > self.sequence().total_tokens() {
             return Err(SlotError::InvalidOperation(format!(
                 "cannot advance computed position from {} by {num_tokens} tokens, total tokens is {}",
-                self.current_position, self.sequence().total_tokens()
+                self.current_position,
+                self.sequence().total_tokens()
             )));
         }
 
@@ -925,7 +1052,7 @@ impl VllmConnectorSlot {
         tracing::debug!(
             request_id = self.request_id,
             operation_id = %operation_id,
-            "onboarding {} blocks from {:?} to device",
+            "start onboarding {} blocks from {:?} to device",
             num_blocks,
             src_storage_pool,
         );
@@ -1042,6 +1169,9 @@ impl LocalTransferEngine {
         let leader_offload = Arc::clone(&self.leader);
         let leader_onboard = Arc::clone(&self.leader);
 
+        let kvbm_metrics_onboard = kvbm_metrics.clone();
+        let kvbm_metrics_offload = kvbm_metrics.clone();
+
         let onboard_task = CriticalTaskExecutionHandle::new_with_runtime(
             |cancellation_token_onboard| async move {
                 while let Some(req) = onboard_rx.recv().await {
@@ -1049,7 +1179,10 @@ impl LocalTransferEngine {
                         tracing::debug!("LocalOnboardTask: received cancellation signal");
                         break;
                     }
-                    if let Err(e) = process_onboard_request(req, &leader_onboard).await {
+                    if let Err(e) =
+                        process_onboard_request(req, &leader_onboard, kvbm_metrics_onboard.clone())
+                            .await
+                    {
                         tracing::error!("LocalOnboardTask: error processing request: {:?}", e);
                     }
                 }
@@ -1071,7 +1204,7 @@ impl LocalTransferEngine {
                         req,
                         &block_manager_offload,
                         &leader_offload,
-                        kvbm_metrics.clone(),
+                        kvbm_metrics_offload.clone(),
                     )
                     .await
                     {
@@ -1145,6 +1278,9 @@ async fn process_offload_request(
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
     kvbm_metrics.offload_requests.inc();
+    kvbm_metrics
+        .offload_blocks_d2h
+        .inc_by(offload_req.block_ids.len() as u64);
 
     let request_id = &offload_req.request_id;
     let operation_id = &offload_req.operation_id;
@@ -1154,7 +1290,6 @@ async fn process_offload_request(
         offload_req.block_ids.len()
     );
 
-    // TODO: Implement actual offload logic
     // 1. Acquire mutable host blocks
     let host_blocks = block_manager
         .host()
@@ -1219,10 +1354,12 @@ async fn process_offload_request(
     // 4. Wait for the offload request to complete
     match notify_receiver.await {
         Ok(_) => {
-            tracing::debug!("Transfer completed successfully");
+            tracing::debug!("Offloading transfer completed successfully");
         }
         Err(_) => {
-            return Err(anyhow::anyhow!("Transfer completion notification failed"));
+            return Err(anyhow::anyhow!(
+                "Offloading transfer completion notification failed"
+            ));
         }
     }
     tracing::debug!(
@@ -1250,7 +1387,19 @@ async fn process_offload_request(
 async fn process_onboard_request(
     onboard_req: LocalOnboardRequest,
     leader: &Arc<KvbmLeader>,
+    kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
+    kvbm_metrics.onboard_requests.inc();
+    if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Host {
+        kvbm_metrics
+            .onboard_blocks_h2d
+            .inc_by(onboard_req.src_blocks.len() as u64);
+    } else if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Disk {
+        kvbm_metrics
+            .onboard_blocks_d2d
+            .inc_by(onboard_req.src_blocks.len() as u64);
+    }
+
     let request_id = &onboard_req.request_id;
     let operation_id = &onboard_req.operation_id;
 
@@ -1281,10 +1430,12 @@ async fn process_onboard_request(
 
     match notify_receiver.await {
         Ok(_) => {
-            tracing::debug!("Transfer completed successfully");
+            tracing::debug!("Onboarding transfer completed successfully");
         }
         Err(_) => {
-            return Err(anyhow::anyhow!("Transfer completion notification failed"));
+            return Err(anyhow::anyhow!(
+                "Onboarding transfer completion notification failed"
+            ));
         }
     }
 

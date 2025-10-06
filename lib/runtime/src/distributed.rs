@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 pub use crate::component::Component;
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
@@ -24,6 +12,7 @@ use crate::{
     transports::{etcd, nats, tcp},
 };
 
+use super::utils::GracefulShutdownTracker;
 use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error};
 use std::sync::OnceLock;
 
@@ -117,6 +106,13 @@ impl DistributedRuntime {
         });
         distributed_runtime.register_metrics_callback(drt_hierarchies, nats_client_callback);
 
+        // Initialize the uptime gauge in SystemHealth
+        distributed_runtime
+            .system_health
+            .lock()
+            .unwrap()
+            .initialize_uptime_gauge(&distributed_runtime)?;
+
         // Handle system status server initialization
         if let Some(cancel_token) = cancel_token {
             // System server is enabled - start both the state and HTTP server
@@ -153,20 +149,35 @@ impl DistributedRuntime {
                 }
             }
         } else {
-            // System server HTTP is disabled, but still create the state for metrics
-            // This ensures uptime_seconds metric is always registered
-            let system_status_state = crate::system_status_server::SystemStatusState::new(
-                Arc::new(distributed_runtime.clone()),
-            )?;
-
-            // Initialize the start time for uptime tracking
-            if let Err(e) = system_status_state.initialize_start_time() {
-                tracing::warn!("Failed to initialize system status start time: {}", e);
-            }
-
+            // System server HTTP is disabled, but uptime metrics are still being tracked via SystemHealth
             tracing::debug!(
                 "System status server HTTP endpoints disabled, but uptime metrics are being tracked"
             );
+        }
+
+        // Start health check manager if enabled
+        if config.health_check_enabled {
+            let health_check_config = crate::health_check::HealthCheckConfig {
+                canary_wait_time: std::time::Duration::from_secs(config.canary_wait_time_secs),
+                request_timeout: std::time::Duration::from_secs(
+                    config.health_check_request_timeout_secs,
+                ),
+            };
+
+            // Start the health check manager (spawns per-endpoint monitoring tasks)
+            match crate::health_check::start_health_check_manager(
+                distributed_runtime.clone(),
+                Some(health_check_config),
+            )
+            .await
+            {
+                Ok(()) => tracing::info!(
+                    "Health check manager started (canary_wait_time: {}s, request_timeout: {}s)",
+                    config.canary_wait_time_secs,
+                    config.health_check_request_timeout_secs
+                ),
+                Err(e) => tracing::error!("Health check manager failed to start: {}", e),
+            }
         }
 
         Ok(distributed_runtime)
@@ -263,6 +274,10 @@ impl DistributedRuntime {
         self.runtime.child_token()
     }
 
+    pub(crate) fn graceful_shutdown_tracker(&self) -> Arc<GracefulShutdownTracker> {
+        self.runtime.graceful_shutdown_tracker()
+    }
+
     pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
         self.instance_sources.clone()
     }
@@ -312,6 +327,19 @@ impl DistributedRuntime {
         }
     }
 
+    /// Clear everything in etcd under a key.
+    /// todo: Remove as soon as we auto-delete the MDC.
+    pub async fn temp_clear_namespace(&self, name: &str) -> anyhow::Result<()> {
+        let Some(etcd_client) = self.etcd_client() else {
+            return Ok(()); // no etcd, nothing to clear
+        };
+        let kvs = etcd_client.kv_get_prefix(name).await?;
+        for kv in kvs {
+            etcd_client.kv_delete(kv.key(), None).await?;
+        }
+        Ok(())
+    }
+
     /// Get all registered hierarchy keys. Private because it is only used for testing.
     fn get_registered_hierarchies(&self) -> Vec<String> {
         let registries = self.hierarchy_to_metricsregistry.read().unwrap();
@@ -348,12 +376,11 @@ impl DistributedConfig {
     }
 }
 
-#[cfg(test)]
-pub mod test_helpers {
+pub mod distributed_test_utils {
     //! Common test helper functions for DistributedRuntime tests
     // TODO: Use in-memory DistributedRuntime for tests instead of full runtime when available.
 
-    /// Helper function to create a DRT instance for tests
+    /// Helper function to create a DRT instance for integration-only tests.
     /// Uses from_current to leverage existing tokio runtime
     /// Note: Settings are read from environment variables inside DistributedRuntime::from_settings_without_discovery
     #[cfg(feature = "integration")]
@@ -362,5 +389,62 @@ pub mod test_helpers {
         crate::DistributedRuntime::from_settings_without_discovery(rt)
             .await
             .unwrap()
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+mod tests {
+    use super::distributed_test_utils::create_test_drt_async;
+
+    #[tokio::test]
+    async fn test_drt_uptime_after_delay_system_disabled() {
+        // Test uptime with system status server disabled
+        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+            // Start a DRT
+            let drt = create_test_drt_async().await;
+
+            // Wait 50ms
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+            // Check that uptime is 50+ ms
+            let uptime = drt.system_health.lock().unwrap().uptime();
+            assert!(
+                uptime >= std::time::Duration::from_millis(50),
+                "Expected uptime to be at least 50ms, but got {:?}",
+                uptime
+            );
+
+            println!(
+                "✓ DRT uptime test passed (system disabled): uptime = {:?}",
+                uptime
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_drt_uptime_after_delay_system_enabled() {
+        // Test uptime with system status server enabled
+        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("true"))], async {
+            // Start a DRT
+            let drt = create_test_drt_async().await;
+
+            // Wait 50ms
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+            // Check that uptime is 50+ ms
+            let uptime = drt.system_health.lock().unwrap().uptime();
+            assert!(
+                uptime >= std::time::Duration::from_millis(50),
+                "Expected uptime to be at least 50ms, but got {:?}",
+                uptime
+            );
+
+            println!(
+                "✓ DRT uptime test passed (system enabled): uptime = {:?}",
+                uptime
+            );
+        })
+        .await;
     }
 }

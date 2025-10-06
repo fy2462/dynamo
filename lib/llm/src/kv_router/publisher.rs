@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_ENDPOINT, KV_METRICS_SUBJECT,
@@ -20,6 +8,7 @@ use crate::kv_router::{
     scoring::LoadEvent,
 };
 use async_trait::async_trait;
+use dynamo_runtime::metrics::{MetricsRegistry, prometheus_names::kvstats};
 use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
 use dynamo_runtime::{
     Error, Result,
@@ -29,15 +18,18 @@ use dynamo_runtime::{
         network::Ingress,
     },
     protocols::annotated::Annotated,
+    transports::nats::{NatsQueue, QUEUE_NAME, Slug},
 };
 use futures::stream;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use rmp_serde as rmps;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use zeromq::{Socket, SocketRecv, SubSocket};
@@ -132,16 +124,27 @@ impl KvEventPublisher {
             )?);
         }
 
-        component
-            .drt()
-            .runtime()
-            .secondary()
-            .spawn(start_event_processor(
-                component,
-                worker_id,
-                cancellation_token.clone(),
-                rx,
-            ));
+        let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
+            .to_string()
+            .replace("_", "-");
+        let nats_server =
+            std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+        // Create NatsQueue without consumer since we're only publishing
+        let mut nats_queue = NatsQueue::new_without_consumer(
+            stream_name,
+            nats_server,
+            std::time::Duration::from_secs(60), // 1 minute timeout
+        );
+
+        // Connect the NatsQueue before passing it to the event processor
+        let cancellation_token_clone = cancellation_token.clone();
+        component.drt().runtime().secondary().spawn(async move {
+            if let Err(e) = nats_queue.connect().await {
+                tracing::error!("Failed to connect NatsQueue: {}", e);
+                return;
+            }
+            start_event_processor(nats_queue, worker_id, cancellation_token_clone, rx).await
+        });
 
         Ok(Self {
             kv_block_size,
@@ -197,7 +200,7 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
                 // Encapsulate in a router event and publish.
                 tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
                 let router_event = RouterEvent::new(worker_id, event);
-                if let Err(e) = publisher.publish(KV_EVENT_SUBJECT, &router_event).await {
+                if let Err(e) = publisher.publish(QUEUE_NAME, &router_event).await {
                     tracing::error!("Failed to publish event: {}", e);
                 }
             }
@@ -362,26 +365,34 @@ fn convert_event(
             token_ids,
             block_size,
             lora_id,
+            ..
         } => {
             let num_block_tokens = vec![block_size as u64; block_hashes.len()];
+            let block_hashes_u64: Vec<u64> = block_hashes
+                .into_iter()
+                .map(BlockHashValue::into_u64)
+                .collect();
             KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: parent_block_hash.map(ExternalSequenceBlockHash::from),
+                    parent_hash: parent_block_hash
+                        .map(BlockHashValue::into_u64)
+                        .map(ExternalSequenceBlockHash::from),
                     blocks: create_stored_blocks(
                         kv_block_size,
                         &token_ids,
                         &num_block_tokens,
-                        &block_hashes,
+                        &block_hashes_u64,
                         lora_id.unwrap_or(0),
                         warning_count,
                     ),
                 }),
             }
         }
-        RawKvEvent::BlockRemoved { block_hashes } => {
+        RawKvEvent::BlockRemoved { block_hashes, .. } => {
             let hashes = block_hashes
                 .into_iter()
+                .map(BlockHashValue::into_u64)
                 .map(ExternalSequenceBlockHash::from)
                 .collect();
             KvCacheEvent {
@@ -400,11 +411,18 @@ fn convert_event(
 
 pub fn create_stored_block_from_parts(
     kv_block_size: u32,
-    block_hash: i64,
+    block_hash: u64,
     token_ids: &[u32],
     _lora_id: u64,
 ) -> KvCacheStoredBlockData {
     let tokens_hash = compute_block_hash_for_seq(token_ids, kv_block_size)[0];
+    tracing::trace!(
+        "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}",
+        block_hash,
+        tokens_hash.0,
+        token_ids,
+        kv_block_size
+    );
     KvCacheStoredBlockData {
         block_hash: ExternalSequenceBlockHash::from(block_hash),
         tokens_hash,
@@ -415,7 +433,7 @@ pub fn create_stored_blocks(
     kv_block_size: u32,
     token_ids: &[u32],
     num_block_tokens: &[u64],
-    block_hashes: &[i64],
+    block_hashes: &[u64],
     lora_id: u64,
     warning_count: &Arc<AtomicU32>,
 ) -> Vec<KvCacheStoredBlockData> {
@@ -459,20 +477,204 @@ struct KvEventBatch {
     data_parallel_rank: u32, // we are ignoring this for now
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(untagged)]
+enum BlockHashValue {
+    Signed(i64),
+    Unsigned(u64),
+}
+
+impl BlockHashValue {
+    fn into_u64(self) -> u64 {
+        match self {
+            BlockHashValue::Signed(v) => v as u64,
+            BlockHashValue::Unsigned(v) => v,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "type")] // msgspec encodes variant tag as a string when `tag=True`
 enum RawKvEvent {
     BlockStored {
-        block_hashes: Vec<i64>,
-        parent_block_hash: Option<i64>,
+        /// Block hashes may be emitted as either signed or unsigned 64-bit values.
+        /// We normalize them to `u64` while deserializing to support both producers.
+        block_hashes: Vec<BlockHashValue>,
+        parent_block_hash: Option<BlockHashValue>,
         token_ids: Vec<u32>,
         block_size: usize,
         lora_id: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium: Option<String>,
     },
     BlockRemoved {
-        block_hashes: Vec<i64>,
+        block_hashes: Vec<BlockHashValue>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium: Option<String>,
     },
     AllBlocksCleared,
+}
+
+/// Our producers use msgspec with `tag=True` and `array_like=True`, which
+/// encodes each event as either a tagged map or a tagged tuple. To be tolerant of
+/// additional fields that may be appended in the future, we implement a custom
+/// deserializer that ignores unknown keys and any extra positional elements.
+///
+/// This keeps us compatible with older payloads while safely
+/// accepting newer ones that include extra metadata.
+impl<'de> Deserialize<'de> for RawKvEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(RawKvEventVisitor)
+    }
+}
+
+struct RawKvEventVisitor;
+
+impl<'de> Visitor<'de> for RawKvEventVisitor {
+    type Value = RawKvEvent;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a kv event encoded as a tagged map or sequence")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut event_type: Option<String> = None;
+        let mut block_hashes: Option<Vec<BlockHashValue>> = None;
+        let mut parent_block_hash: Option<Option<BlockHashValue>> = None;
+        let mut token_ids: Option<Vec<u32>> = None;
+        let mut block_size: Option<usize> = None;
+        let mut lora_id: Option<Option<u64>> = None;
+        let mut medium: Option<Option<String>> = None;
+
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "type" => {
+                    event_type = Some(map.next_value()?);
+                }
+                "block_hashes" => {
+                    block_hashes = Some(map.next_value()?);
+                }
+                "parent_block_hash" => {
+                    parent_block_hash = Some(map.next_value()?);
+                }
+                "token_ids" => {
+                    token_ids = Some(map.next_value()?);
+                }
+                "block_size" => {
+                    block_size = Some(map.next_value()?);
+                }
+                "lora_id" => {
+                    lora_id = Some(map.next_value()?);
+                }
+                "medium" => {
+                    medium = Some(map.next_value()?);
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+
+        match event_type.as_deref() {
+            Some("BlockStored") => {
+                let block_hashes =
+                    block_hashes.ok_or_else(|| de::Error::missing_field("block_hashes"))?;
+                let token_ids = token_ids.ok_or_else(|| de::Error::missing_field("token_ids"))?;
+                let block_size =
+                    block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
+                Ok(RawKvEvent::BlockStored {
+                    block_hashes,
+                    parent_block_hash: parent_block_hash.unwrap_or(None),
+                    token_ids,
+                    block_size,
+                    lora_id: lora_id.unwrap_or(None),
+                    medium: medium.unwrap_or(None),
+                })
+            }
+            Some("BlockRemoved") => {
+                let block_hashes =
+                    block_hashes.ok_or_else(|| de::Error::missing_field("block_hashes"))?;
+                Ok(RawKvEvent::BlockRemoved {
+                    block_hashes,
+                    medium: medium.unwrap_or(None),
+                })
+            }
+            Some("AllBlocksCleared") => Ok(RawKvEvent::AllBlocksCleared),
+            Some(other) => Err(de::Error::unknown_variant(
+                other,
+                &["BlockStored", "BlockRemoved", "AllBlocksCleared"],
+            )),
+            None => Err(de::Error::missing_field("type")),
+        }
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let tag: Option<String> = seq.next_element()?;
+        let Some(tag) = tag else {
+            return Err(de::Error::invalid_length(
+                0,
+                &"sequence must start with event tag",
+            ));
+        };
+
+        match tag.as_str() {
+            "BlockStored" => {
+                let block_hashes: Vec<BlockHashValue> = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
+                let parent_block_hash: Option<BlockHashValue> = seq.next_element()?.unwrap_or(None);
+                let token_ids: Vec<u32> = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(3, &"missing token_ids"))?;
+                let block_size: usize = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(4, &"missing block_size"))?;
+                let lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
+                let medium: Option<String> = seq.next_element()?.unwrap_or(None);
+
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+
+                Ok(RawKvEvent::BlockStored {
+                    block_hashes,
+                    parent_block_hash,
+                    token_ids,
+                    block_size,
+                    lora_id,
+                    medium,
+                })
+            }
+            "BlockRemoved" => {
+                let block_hashes: Vec<BlockHashValue> = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
+                let medium: Option<String> = seq.next_element()?.unwrap_or(None);
+
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+
+                Ok(RawKvEvent::BlockRemoved {
+                    block_hashes,
+                    medium,
+                })
+            }
+            "AllBlocksCleared" => {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(RawKvEvent::AllBlocksCleared)
+            }
+            other => Err(de::Error::unknown_variant(
+                other,
+                &["BlockStored", "BlockRemoved", "AllBlocksCleared"],
+            )),
+        }
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -482,12 +684,77 @@ enum RawKvEvent {
 pub struct WorkerMetricsPublisher {
     tx: tokio::sync::watch::Sender<Arc<ForwardPassMetrics>>,
     rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
+    /// Prometheus gauges for KvStats metrics
+    /// We use OnceLock for efficient one-time initialization and lock-free reads
+    /// The gauges are set once during register_prometheus_metrics and then only read
+    prometheus_gauges: OnceLock<KvStatsPrometheusGauges>,
+}
+
+struct KvStatsPrometheusGauges {
+    kv_active_blocks_gauge: prometheus::Gauge,
+    kv_total_blocks_gauge: prometheus::Gauge,
+    gpu_cache_usage_gauge: prometheus::Gauge,
+    gpu_prefix_cache_hit_rate_gauge: prometheus::Gauge,
+}
+
+impl KvStatsPrometheusGauges {
+    /// Create a new KvStatsPrometheusGauges instance with all metrics registered
+    fn new(component: &Component) -> Result<Self> {
+        let kv_active_blocks_gauge = component.create_gauge(
+            kvstats::ACTIVE_BLOCKS,
+            "Number of active KV cache blocks currently in use",
+            &[],
+        )?;
+
+        let kv_total_blocks_gauge = component.create_gauge(
+            kvstats::TOTAL_BLOCKS,
+            "Total number of KV cache blocks available",
+            &[],
+        )?;
+
+        let gpu_cache_usage_gauge = component.create_gauge(
+            kvstats::GPU_CACHE_USAGE_PERCENT,
+            "GPU cache usage as a percentage (0.0-1.0)",
+            &[],
+        )?;
+
+        let gpu_prefix_cache_hit_rate_gauge = component.create_gauge(
+            kvstats::GPU_PREFIX_CACHE_HIT_RATE,
+            "GPU prefix cache hit rate as a percentage (0.0-1.0)",
+            &[],
+        )?;
+
+        tracing::info!("Registered KvStats Prometheus metrics");
+
+        Ok(KvStatsPrometheusGauges {
+            kv_active_blocks_gauge,
+            kv_total_blocks_gauge,
+            gpu_cache_usage_gauge,
+            gpu_prefix_cache_hit_rate_gauge,
+        })
+    }
+
+    /// Update all gauges with values from KvStats
+    fn update_from_kvstats(&self, kv_stats: &KvStats) {
+        self.kv_active_blocks_gauge
+            .set(kv_stats.kv_active_blocks as f64);
+        self.kv_total_blocks_gauge
+            .set(kv_stats.kv_total_blocks as f64);
+        self.gpu_cache_usage_gauge
+            .set(kv_stats.gpu_cache_usage_perc as f64);
+        self.gpu_prefix_cache_hit_rate_gauge
+            .set(kv_stats.gpu_prefix_cache_hit_rate as f64);
+    }
 }
 
 impl WorkerMetricsPublisher {
     pub fn new() -> Result<Self> {
         let (tx, rx) = tokio::sync::watch::channel(Arc::new(ForwardPassMetrics::default()));
-        Ok(WorkerMetricsPublisher { tx, rx })
+        Ok(WorkerMetricsPublisher {
+            tx,
+            rx,
+            prometheus_gauges: OnceLock::new(),
+        })
     }
 
     pub fn publish(
@@ -495,7 +762,25 @@ impl WorkerMetricsPublisher {
         metrics: Arc<ForwardPassMetrics>,
     ) -> Result<(), tokio::sync::watch::error::SendError<Arc<ForwardPassMetrics>>> {
         tracing::trace!("Publish metrics: {metrics:?}");
+
+        // Update Prometheus gauges - OnceLock provides lock-free reads after initialization
+        // This is the hot path - we only read the Arc, no locking overhead
+        if let Some(gauges) = self.prometheus_gauges.get() {
+            gauges.update_from_kvstats(&metrics.kv_stats);
+        }
+
         self.tx.send(metrics)
+    }
+
+    /// Register KvStats Prometheus metrics with the component's registry
+    pub fn register_prometheus_metrics(&self, component: &Component) -> Result<()> {
+        // Use get_or_init for thread-safe one-time initialization
+        // This will only initialize once, subsequent calls will return immediately
+        self.prometheus_gauges.get_or_init(|| {
+            KvStatsPrometheusGauges::new(component).expect("Failed to create Prometheus gauges")
+        });
+
+        Ok(())
     }
 
     pub async fn create_endpoint(
@@ -661,7 +946,7 @@ mod test_event_processing {
 
         let stored = create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, 0);
 
-        assert_eq!(stored.block_hash.0, blk_hash as u64);
+        assert_eq!(stored.block_hash.0, blk_hash);
         let expected_hash = compute_block_hash_for_seq(&token_ids, 4)[0];
         assert_eq!(stored.tokens_hash, expected_hash);
     }
@@ -675,7 +960,7 @@ mod test_event_processing {
         // two blocks, each of size 4
         let token_ids = vec![1, 2, 3, 4, 5, 6, 7, 8];
         let num_block_tokens = vec![4_u64, 4_u64];
-        let block_hashes = vec![111_i64, 222_i64];
+        let block_hashes = vec![111_u64, 222_u64];
 
         let blocks = create_stored_blocks(
             kv_block_size,
@@ -697,7 +982,7 @@ mod test_event_processing {
         // second block is the wrong size
         let token_ids = vec![1, 2, 3, 4, 5, 6, 7];
         let num_block_tokens = vec![4_u64, 3_u64];
-        let block_hashes = vec![111_i64, 222_i64];
+        let block_hashes = vec![111_u64, 222_u64];
         let warning_count = Arc::new(AtomicU32::new(0));
 
         let blocks = create_stored_blocks(
@@ -721,11 +1006,12 @@ mod test_event_processing {
     fn test_convert_event_block_stored() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::BlockStored {
-            block_hashes: vec![10, 11],
-            parent_block_hash: Some(99),
+            block_hashes: vec![BlockHashValue::Unsigned(10), BlockHashValue::Unsigned(11)],
+            parent_block_hash: Some(BlockHashValue::Unsigned(99)),
             token_ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
             block_size: 4,
             lora_id: Some(0),
+            medium: None,
         };
 
         let out = convert_event(raw_evt, 42, kv_block_size, &Arc::new(AtomicU32::new(0)));
@@ -736,7 +1022,8 @@ mod test_event_processing {
     fn test_convert_event_block_removed() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::BlockRemoved {
-            block_hashes: vec![123, 456],
+            block_hashes: vec![BlockHashValue::Unsigned(123), BlockHashValue::Signed(456)],
+            medium: None,
         };
         let out = convert_event(raw_evt, 7, kv_block_size, &Arc::new(AtomicU32::new(0)));
 
@@ -845,7 +1132,7 @@ mod tests_startup_helpers {
         let published = published.lock().unwrap();
         assert_eq!(published.len(), 1);
         let (subject, _) = &published[0];
-        assert_eq!(subject, &KV_EVENT_SUBJECT.to_string());
+        assert_eq!(subject, QUEUE_NAME);
     }
 
     //--------------------------------------------------------------------
@@ -881,11 +1168,12 @@ mod tests_startup_helpers {
         let seq: u64 = 77;
 
         let events = vec![RawKvEvent::BlockStored {
-            block_hashes: vec![42],
+            block_hashes: vec![BlockHashValue::Unsigned(42)],
             parent_block_hash: None,
             token_ids: vec![0, 1, 2, 3],
             block_size: 4,
             lora_id: None,
+            medium: None,
         }];
 
         let batch = KvEventBatch {
@@ -981,21 +1269,20 @@ mod test_exponential_backoff {
     }
 }
 
-#[cfg(test)]
-mod test_worker_metrics_publisher {
+#[cfg(all(test, feature = "integration"))]
+mod test_integration_publisher {
     use super::*;
     use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
-    use dynamo_runtime::traits::events::EventSubscriber; // Add this import
-    use dynamo_runtime::{DistributedRuntime, Runtime};
+    use dynamo_runtime::distributed_test_utils::create_test_drt_async;
+    use dynamo_runtime::traits::events::EventSubscriber;
     use futures::StreamExt;
 
     #[tokio::test]
-    #[ignore] // Mark as ignored as requested
+    #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
     async fn test_metrics_publishing_behavior() -> Result<()> {
         // Set up runtime and namespace
-        let rt = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::from_settings(rt.clone()).await?;
-        let namespace = drt.namespace("test".to_string())?;
+        let drt = create_test_drt_async().await;
+        let namespace = drt.namespace("ns2001".to_string())?;
 
         // Create a subscriber for the metrics events using subscribe_with_type
         let mut subscriber = namespace
@@ -1088,8 +1375,92 @@ mod test_worker_metrics_publisher {
             "Expected no messages when load metrics don't change"
         );
 
-        rt.shutdown();
+        drt.shutdown();
 
         Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
+    async fn test_kvstats_prometheus_gauge_updates() {
+        use crate::kv_router::publisher::kvstats;
+        use dynamo_runtime::metrics::MetricsRegistry;
+
+        // Test that publish() updates Prometheus gauges correctly using real Component
+        let publisher = WorkerMetricsPublisher::new().unwrap();
+
+        // Create a real DRT and component for integration testing
+        let drt = create_test_drt_async().await;
+        let namespace = drt.namespace("ns2002".to_string()).unwrap();
+        let component = namespace.component("comp2002".to_string()).unwrap();
+
+        // Register Prometheus metrics using the real constructor
+        publisher.register_prometheus_metrics(&component).unwrap();
+
+        // Get references to the gauges for testing
+        let gauges = publisher.prometheus_gauges.get().unwrap();
+        let active_blocks_gauge = gauges.kv_active_blocks_gauge.clone();
+        let total_blocks_gauge = gauges.kv_total_blocks_gauge.clone();
+        let cache_usage_gauge = gauges.gpu_cache_usage_gauge.clone();
+        let hit_rate_gauge = gauges.gpu_prefix_cache_hit_rate_gauge.clone();
+
+        // Create test metrics with specific values
+        let test_metrics = Arc::new(ForwardPassMetrics {
+            worker_stats: WorkerStats {
+                data_parallel_rank: None,
+                request_active_slots: 5,
+                request_total_slots: 100,
+                num_requests_waiting: 2,
+            },
+            kv_stats: KvStats {
+                kv_active_blocks: 42,
+                kv_total_blocks: 12894,
+                gpu_cache_usage_perc: 0.5,
+                gpu_prefix_cache_hit_rate: 0.75,
+            },
+            spec_decode_stats: None,
+        });
+
+        // Test 1: Initial gauge values should be 0
+        assert_eq!(active_blocks_gauge.get(), 0.0);
+        assert_eq!(total_blocks_gauge.get(), 0.0);
+        assert_eq!(cache_usage_gauge.get(), 0.0);
+        assert_eq!(hit_rate_gauge.get(), 0.0);
+
+        // Test 2: publish() should update all gauges with correct values
+        let result = publisher.publish(test_metrics);
+        assert!(result.is_ok());
+
+        // Test 3: Verify gauges were updated correctly
+        assert_eq!(active_blocks_gauge.get(), 42.0);
+        assert_eq!(total_blocks_gauge.get(), 12894.0);
+        assert_eq!(cache_usage_gauge.get(), 0.5);
+        assert_eq!(hit_rate_gauge.get(), 0.75);
+
+        // Test 4: Verify metrics are properly registered in the component's registry
+        // Component implements MetricsRegistry trait which provides prometheus_metrics_fmt()
+        let prometheus_output = component.prometheus_metrics_fmt().unwrap();
+
+        // Verify metric names are present
+        assert!(prometheus_output.contains(kvstats::ACTIVE_BLOCKS));
+        assert!(prometheus_output.contains(kvstats::TOTAL_BLOCKS));
+        assert!(prometheus_output.contains(kvstats::GPU_CACHE_USAGE_PERCENT));
+        assert!(prometheus_output.contains(kvstats::GPU_PREFIX_CACHE_HIT_RATE));
+
+        // Test 5: Verify the prometheus output contains the actual values
+        // Print the output to debug format issues
+        println!("Prometheus output:\n{}", prometheus_output);
+
+        // Check for metric values - the format includes labels so we need to be more flexible
+        assert!(prometheus_output.contains("kvstats_active_blocks"));
+        assert!(prometheus_output.contains("42")); // The value should be there
+        assert!(prometheus_output.contains("kvstats_total_blocks"));
+        assert!(prometheus_output.contains("12894")); // The value should be there
+        assert!(prometheus_output.contains("kvstats_gpu_cache_usage_percent"));
+        assert!(prometheus_output.contains("kvstats_gpu_prefix_cache_hit_rate"));
+
+        println!(
+            "✅ KvStatsPrometheusGauges constructor and publish() work correctly with real Component"
+        );
     }
 }

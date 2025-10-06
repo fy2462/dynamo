@@ -25,16 +25,20 @@ import (
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
+
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -55,20 +59,6 @@ const (
 	PendingState State = "pending"
 )
 
-var (
-	// Grove GroupVersionResources for scaling operations
-	podCliqueGVR = schema.GroupVersionResource{
-		Group:    "grove.io",
-		Version:  "v1alpha1",
-		Resource: "podcliques",
-	}
-	podCliqueScalingGroupGVR = schema.GroupVersionResource{
-		Group:    "grove.io",
-		Version:  "v1alpha1",
-		Resource: "podcliquescalinggroups",
-	}
-)
-
 type etcdStorage interface {
 	DeleteKeys(ctx context.Context, prefix string) error
 }
@@ -80,14 +70,16 @@ type DynamoGraphDeploymentReconciler struct {
 	Recorder              record.EventRecorder
 	DockerSecretRetriever dockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
+	MPISecretReplicator   *secret.SecretReplicator
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
-// +kubebuilder:rbac:groups=grove.io,resources=podgangsets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
+// +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -105,15 +97,10 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	reason := Reason("undefined")
 	message := Message("")
 	state := PendingState
-	readyStatus := metav1.ConditionFalse
 	// retrieve the CRD
 	dynamoDeployment := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-	if err != nil {
-		// not found, nothing to do
-		return ctrl.Result{}, nil
 	}
 
 	defer func() {
@@ -123,10 +110,13 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			logger.Error(err, "Reconciliation failed")
 		}
 		dynamoDeployment.SetState(string(state))
+
+		readyStatus := metav1.ConditionFalse
 		if state == ReadyState {
 			readyStatus = metav1.ConditionTrue
 		}
-		// update the CRD status condition
+
+		// Update Ready condition
 		dynamoDeployment.AddStatusCondition(metav1.Condition{
 			Type:               "Ready",
 			Status:             readyStatus,
@@ -134,9 +124,10 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			Message:            string(message),
 			LastTransitionTime: metav1.Now(),
 		})
+
 		err = r.Status().Update(ctx, dynamoDeployment)
 		if err != nil {
-			logger.Error(err, "Unable to update the CRD status", "crd", req.NamespacedName)
+			logger.Error(err, "Unable to update the CRD status", "crd", req.NamespacedName, "state", state, "reason", reason, "message", message)
 		}
 		logger.Info("Reconciliation done")
 	}()
@@ -160,20 +151,50 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 }
 
 type Resource interface {
-	IsReady() bool
+	IsReady() (ready bool, reason string)
 	GetName() string
 }
 
 func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
-	if r.Config.Grove.Enabled {
-		// check if explicit opt out of grove
-		if dynamoDeployment.Annotations[consts.KubeAnnotationEnableGrove] == consts.KubeLabelValueFalse {
-			logger.Info("Grove is explicitly disabled for this deployment, skipping grove resources reconciliation")
-			return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment)
+
+	// Reconcile top-level PVCs first
+	err := r.reconcilePVCs(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile top-level PVCs")
+		return "", "", "", fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
+	}
+
+	// Orchestrator selection via single boolean annotation: nvidia.com/enable-grove
+	// Unset or not "false": Grove if available; else component mode
+	// "false": component mode (multinode -> LWS; single-node -> standard)
+	enableGrove := true
+	if dynamoDeployment.Annotations != nil && strings.ToLower(dynamoDeployment.Annotations[consts.KubeAnnotationEnableGrove]) == consts.KubeLabelValueFalse {
+		enableGrove = false
+	}
+
+	// Determine if any service is multinode
+	hasMultinode := dynamoDeployment.HasAnyMultinodeService()
+
+	// Always ensure MPI SSH secret is available in this namespace
+	if r.MPISecretReplicator != nil {
+		err := r.MPISecretReplicator.Replicate(ctx, dynamoDeployment.Namespace)
+		if err != nil {
+			logger.Error(err, "Failed to replicate MPI secret", "namespace", dynamoDeployment.Namespace)
+			return "", "", "", fmt.Errorf("failed to replicate MPI secret: %w", err)
 		}
+	}
+
+	if enableGrove && r.Config.Grove.Enabled {
+		logger.Info("Reconciling Grove resources", "enableGrove", enableGrove, "groveEnabled", r.Config.Grove.Enabled, "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
 		return r.reconcileGroveResources(ctx, dynamoDeployment)
 	}
+	if hasMultinode && !r.Config.LWS.Enabled {
+		err := fmt.Errorf("no multinode orchestrator available")
+		logger.Error(err, err.Error(), "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled, "enableGrove", enableGrove, "groveEnabled", r.Config.Grove.Enabled)
+		return "", "", "", err
+	}
+	logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled, "enableGrove", enableGrove, "groveEnabled", r.Config.Grove.Enabled)
 	return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment)
 
 }
@@ -185,9 +206,9 @@ func (r *DynamoGraphDeploymentReconciler) scaleGroveResource(ctx context.Context
 	var gvr schema.GroupVersionResource
 	switch resourceType {
 	case "PodClique":
-		gvr = podCliqueGVR
+		gvr = consts.PodCliqueGVR
 	case "PodCliqueScalingGroup":
-		gvr = podCliqueScalingGroupGVR
+		gvr = consts.PodCliqueScalingGroupGVR
 	default:
 		return fmt.Errorf("unsupported Grove resource type: %s", resourceType)
 	}
@@ -255,29 +276,34 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
 	// generate the dynamoComponentsDeployments from the config
-	groveGangSet, err := dynamo.GenerateGrovePodGangSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever)
+	groveGangSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return "", "", "", fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
-	_, syncedGroveGangSet, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*grovev1alpha1.PodGangSet, bool, error) {
+	_, syncedGroveGangSet, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*grovev1alpha1.PodCliqueSet, bool, error) {
 		return groveGangSet, false, nil
 	})
 	if err != nil {
 		logger.Error(err, "failed to sync the Grove GangSet")
 		return "", "", "", fmt.Errorf("failed to sync the Grove GangSet: %w", err)
 	}
-	groveGangSetAsResource := commonController.WrapResource(syncedGroveGangSet, func() bool {
-		if syncedGroveGangSet.Status.LastOperation != nil && syncedGroveGangSet.Status.LastOperation.State == grovev1alpha1.LastOperationStateSucceeded {
-			return true
-		}
-		return false
-	})
+	groveGangSetAsResource := commonController.WrapResource(
+		syncedGroveGangSet,
+		func() (bool, string) {
+			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas
+			allComponentsReady, reason := dynamo.EvaluateAllComponentsReady(ctx, r.Client, dynamoDeployment)
+			if !allComponentsReady {
+				return false, reason
+			}
+			return true, ""
+		},
+	)
 
 	// Handle Grove scaling operations after structural changes
 	if err := r.reconcileGroveScaling(ctx, dynamoDeployment); err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
-		return FailedState, "grove_scaling_failed", Message(err.Error()), err
+		return "", "", "", fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
 	resources := []Resource{groveGangSetAsResource}
@@ -296,9 +322,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				logger.Error(err, "failed to sync the main component service")
 				return "", "", "", fmt.Errorf("failed to sync the main component service: %w", err)
 			}
-			mainComponentServiceAsResource := commonController.WrapResource(syncedMainComponentService, func() bool {
-				return true
-			})
+			mainComponentServiceAsResource := commonController.WrapResource(syncedMainComponentService,
+				func() (bool, string) {
+					return true, ""
+				})
 			resources = append(resources, mainComponentServiceAsResource)
 			// generate the main component ingress
 			ingressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
@@ -317,9 +344,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				logger.Error(err, "failed to sync the main component ingress")
 				return "", "", "", fmt.Errorf("failed to sync the main component ingress: %w", err)
 			}
-			resources = append(resources, commonController.WrapResource(syncedMainComponentIngress, func() bool {
-				return true
-			}))
+			resources = append(resources, commonController.WrapResource(syncedMainComponentIngress,
+				func() (bool, string) {
+					return true, ""
+				}))
 			// generate the main component virtual service
 			if r.Config.IngressConfig.UseVirtualService() {
 				mainComponentVirtualService := dynamo.GenerateComponentVirtualService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace, ingressSpec)
@@ -334,9 +362,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 					logger.Error(err, "failed to sync the main component virtual service")
 					return "", "", "", fmt.Errorf("failed to sync the main component virtual service: %w", err)
 				}
-				resources = append(resources, commonController.WrapResource(syncedMainComponentVirtualService, func() bool {
-					return true
-				}))
+				resources = append(resources, commonController.WrapResource(syncedMainComponentVirtualService,
+					func() (bool, string) {
+						return true, ""
+					}))
 			}
 		}
 	}
@@ -344,16 +373,21 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 }
 
 func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Resource) (State, Reason, Message, error) {
+	var notReadyReasons []string
 	notReadyResources := []string{}
+
 	for _, resource := range resources {
-		if !resource.IsReady() {
+		ready, reason := resource.IsReady()
+		if !ready {
 			notReadyResources = append(notReadyResources, resource.GetName())
+			notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s: %s", resource.GetName(), reason))
 		}
 	}
+
 	if len(notReadyResources) == 0 {
 		return ReadyState, "all_resources_are_ready", Message("All resources are ready"), nil
 	}
-	return PendingState, "some_resources_are_not_ready", Message(fmt.Sprintf("%d resources not ready: %v", len(notReadyResources), notReadyResources)), nil
+	return PendingState, "some_resources_are_not_ready", Message(fmt.Sprintf("Resources not ready: %s", strings.Join(notReadyReasons, "; "))), nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
@@ -384,6 +418,68 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	return r.checkResourcesReadiness(resources)
 }
 
+// reconcilePVC reconciles a single top-level PVC defined in the DynamoGraphDeployment spec
+func (r *DynamoGraphDeploymentReconciler) reconcilePVC(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, pvcName string, pvcConfig nvidiacomv1alpha1.PVC) (*corev1.PersistentVolumeClaim, error) {
+	logger := log.FromContext(ctx)
+
+	pvc := &corev1.PersistentVolumeClaim{}
+	pvcNamespacedName := types.NamespacedName{Name: pvcName, Namespace: dynamoDeployment.Namespace}
+	err := r.Get(ctx, pvcNamespacedName, pvc)
+	if err != nil && client.IgnoreNotFound(err) != nil {
+		logger.Error(err, "Unable to retrieve top-level PVC", "pvcName", pvcName)
+		return nil, err
+	}
+
+	// If PVC does not exist, create a new one
+	if err != nil {
+		if pvcConfig.Create == nil || !*pvcConfig.Create {
+			logger.Error(err, "Top-level PVC does not exist and create is not enabled", "pvcName", pvcName)
+			return nil, err
+		}
+
+		pvc = constructPVC(dynamoDeployment, pvcConfig)
+		if err := controllerutil.SetControllerReference(dynamoDeployment, pvc, r.Client.Scheme()); err != nil {
+			logger.Error(err, "Failed to set controller reference for top-level PVC", "pvcName", pvcName)
+			return nil, err
+		}
+
+		err = r.Create(ctx, pvc)
+		if err != nil {
+			logger.Error(err, "Failed to create top-level PVC", "pvcName", pvcName)
+			return nil, err
+		}
+		logger.Info("Top-level PVC created", "pvcName", pvcName, "namespace", dynamoDeployment.Namespace)
+	}
+
+	return pvc, nil
+}
+
+// reconcilePVCs reconciles all top-level PVCs defined in the DynamoGraphDeployment spec
+func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	logger := log.FromContext(ctx)
+
+	if dynamoDeployment.Spec.PVCs == nil {
+		return nil
+	}
+
+	for _, pvcConfig := range dynamoDeployment.Spec.PVCs {
+		if pvcConfig.Name == nil || *pvcConfig.Name == "" {
+			logger.Error(nil, "PVC not reconcilable: name is required", "pvcConfig", pvcConfig)
+			continue
+		}
+
+		pvcName := *pvcConfig.Name
+		logger.Info("Reconciling top-level PVC", "pvcName", pvcName, "namespace", dynamoDeployment.Namespace)
+
+		_, err := r.reconcilePVC(ctx, dynamoDeployment, pvcName, pvcConfig)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
 	// for now doing nothing
 	return nil
@@ -403,9 +499,16 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
+		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.Funcs{
+			// ignore creation cause we don't want to be called again after we create the PVC
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
+			GenericFunc: func(ge event.GenericEvent) bool { return true },
+		})).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config))
 	if r.Config.Grove.Enabled {
-		ctrlBuilder = ctrlBuilder.Owns(&grovev1alpha1.PodGangSet{}, builder.WithPredicates(predicate.Funcs{
+		ctrlBuilder = ctrlBuilder.Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the pod gang set
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },

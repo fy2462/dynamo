@@ -19,6 +19,101 @@ limitations under the License.
 
 > Warning: Dev Containers (aka `devcontainers`) is an evolving feature and we are not testing in CI. Please submit any problem/feedback using the issues on GitHub.
 
+## Framework-Specific Devcontainers
+
+This directory contains framework-specific devcontainer configurations generated from a Jinja2 template:
+
+- **`vllm/`** - Development environment for vLLM framework
+- **`sglang/`** - Development environment for SGLang framework
+- **`trtllm/`** - Development environment for TensorRT-LLM framework
+
+### Template System
+
+The devcontainer configurations are generated from:
+- **`devcontainer.json.j2`** - Jinja2 template with framework variables
+- **`gen_devcontainer_json.py`** - Python script to generate configs
+
+To regenerate the framework-specific configurations after making changes:
+```bash
+cd .devcontainer
+python3 gen_devcontainer_json.py
+```
+
+**Important**: Do not edit the generated `devcontainer.json` files directly. They contain auto-generated warnings and will be overwritten. Instead, edit the `devcontainer.json.j2` template and regenerate.
+
+#### Why We Use Templates Instead of a Single devcontainer.json
+
+The Dev Container Extension requires that each `devcontainer.json` file follow a specific directory convention, which results in significant duplication across framework-specific configurations. See https://code.visualstudio.com/remote/advancedcontainers/connect-multiple-containers
+
+```
+📁 project-root
+    📁 .git
+    📁 .devcontainer
+      📁 python-container
+        📄 devcontainer.json
+      📁 node-container
+        📄 devcontainer.json
+    📁 python-src
+        📄 hello.py
+    📁 node-src
+        📄 hello.js
+    📄 docker-compose.yml
+```
+
+Alternative approaches using undocumented methods (e.g., changing devcontainer.json name, custom configurations) were explored but proved unsuccessful. The template system was developed to minimize duplication while maintaining compatibility with the Dev Container Extension's directory requirements.
+
+Until the Microsoft Dev Container Extension adds new functionalities, this remains the recommended approach for managing multiple Dev Container configurations.
+
+```mermaid
+graph TB
+    subgraph "Developer Laptop"
+        subgraph IDE["Cursor/VS Code"]
+            EXT["Dev Container Extension"]
+            SSHEXT["Remote-SSH Extension"]
+        end
+        TERM["iTerm/Terminal"]
+    end
+
+    subgraph WS["Linux Workstation"]
+        DIR["~/dynamo<br/>(host directory)"]
+        HFCACHE["~/.cache/huggingface<br/>(host cache)"]
+        GITCONFIG["~/.gitconfig<br/>(host git config)"]
+
+        subgraph CONTAINER["Docker Container<br/>vsc-dynamo-SHA-uid<br/>Running as: ubuntu user"]
+            MOUNT["/home/ubuntu/dynamo<br/>(mounted directory)"]
+            HFMOUNT["/home/ubuntu/.cache/huggingface<br/>(mounted cache)"]
+            GITCONFIGCOPY["/home/ubuntu/.gitconfig<br/>(via Dev Container setting)"]
+            TOOLS["rust-analyzer<br/>cargo<br/>etc."]
+        end
+
+        IMAGE["Docker Image<br/>dynamo:latest-{framework}-local-dev<br/>(vllm/sglang/trtllm)"]
+
+        IMAGE -->|"docker run<br/>as ubuntu user"| CONTAINER
+    end
+
+    TERM -->|"SSH Connection"| DIR
+    SSHEXT -->|"1. Remote-SSH"| DIR
+    EXT -->|"2. Dev Container:<br/>Open Folder (via ssh)"| IMAGE
+    EXT -->|"3. IDE/shell via<br/>ssh+docker exec"| CONTAINER
+    DIR <-.->|"Volume Mount<br/>(bidirectional)"| MOUNT
+    HFCACHE <-.->|"Volume Mount<br/>(HF cache)"| HFMOUNT
+    GITCONFIG -->|"Copy"| GITCONFIGCOPY
+
+    style IDE fill:#e1f5fe
+    style EXT fill:#cfe2ff
+    style SSHEXT fill:#cfe2ff
+    style TERM fill:#e1f5fe
+    style DIR fill:#fff3e0
+    style HFCACHE fill:#fff3e0
+    style GITCONFIG fill:#fff3e0
+    style IMAGE fill:#f3e5f5
+    style CONTAINER fill:#d4edda
+    style MOUNT fill:#fff9c4
+    style HFMOUNT fill:#fff9c4
+    style GITCONFIGCOPY fill:#fff9c4
+    style TOOLS fill:#ffebee
+```
+
 ## Prerequisites
 
 Before you begin, ensure you have the following installed:
@@ -39,16 +134,40 @@ You must have the following path on your host.
 
 Follow these steps to get your NVIDIA Dynamo development environment up and running:
 
-### Step 1: Build the Development Container Image
+### Step 0: Build the Development Container Image
 
-Build `dynamo:latest-vllm-local-dev` from scratch from the source:
-- Note that currently, `local-dev` are only implemented for `--framework VLLM` and `--framework SGLANG`, for now.
+Build the appropriate framework image (e.g., `dynamo:latest-vllm-local-dev`) from scratch from the source:
 
 ```bash
-./container/build.sh --target local-dev
+# Single command approach (recommended)
+export FRAMEWORK=VLLM         # Note: any of VLLM, SGLANG, TRTLLM can be used
+./container/build.sh --framework $FRAMEWORK --target local-dev
+
+# Now you've created both dynamo:latest-vllm and dynamo:latest-vllm-local-dev
 ```
 
-The container will be built and give certain file permissions to your local uid and gid.
+Alternatively, you can build a development container, then build local-dev:
+
+```bash
+export FRAMEWORK=VLLM
+
+./container/build.sh --framework $FRAMEWORK
+# Now you have a development image dynamo:latest-vllm
+
+./container/build.sh --dev-image dynamo:latest-${FRAMEWORK,,}
+# Now you have a local-dev image dynamo:latest-vllm-local-dev
+```
+
+The local-dev image will give you local user permissions matching your host user and includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
+
+### Step 1: Choose Your Framework
+
+Select the appropriate devcontainer based on your framework:
+- Use `vllm/devcontainer.json` for vLLM development
+- Use `sglang/devcontainer.json` for SGLang development
+- Use `trtllm/devcontainer.json` for TensorRT-LLM development
+
+When opening the devcontainer in VS Code/Cursor, navigate to the specific framework directory (e.g., `.devcontainer/vllm/`) and open that devcontainer.json.
 
 ### Step 2: Install Dev Containers Extension
 
@@ -145,13 +264,6 @@ File Structure:
 - Bash memory preserved between sessions at `/home/ubuntu/.commandhistory` using docker volume `dynamo-bashhistory`
 - Precommit preserved between sessions at `/home/ubuntu/.cache/precommit` using docker volume `dynamo-precommit-cache`
 
-## Customization
-Edit `.devcontainer/devcontainer.json` to modify:
-- VS Code settings and extensions
-- Environment variables
-- Container configuration
-- Custom Mounts
-
 ## Documentation
 
 To look at the docs run:
@@ -192,6 +304,7 @@ cp .devcontainer/devcontainer.json .devcontainer/jensen_dev/devcontainer.json
 ```
 
 Common customizations include additional mounts, environment variables, IDE extensions, and build arguments. When you open a new Dev Container, you can pick from any of the `.devcontainer/<path>/devcontainer.json` files available.
+
 
 ### SSH Keys for Git Operations
 
@@ -305,13 +418,16 @@ If you see errors like "container is not running" or "An error occurred setting 
 
 **Common Causes and Solutions:**
 
-1. **Missing base image:**
+1. **Missing a local-dev image:**
    ```bash
-   # Check if the required image exists
+   # Check if the required local-dev image exists
    docker images | grep dynamo
 
-   # If missing, build the dev image first
-   ./container/build.sh --target local-dev
+   # If missing, build the dev image first, then build local-dev
+   export FRAMEWORK=VLLM  # Replace with VLLM, SGLANG, or TRTLLM
+   ./container/build.sh --framework $FRAMEWORK
+   ./container/build.sh --dev-image dynamo:latest-${FRAMEWORK,,} --framework $FRAMEWORK
+   # Now you have dynamo:latest-vllm-local-dev
    ```
 
 2. **Container startup failure:**

@@ -92,7 +92,7 @@ pub enum InputContent {
     InputItemContentList(Vec<ContentType>),
 }
 
-/// Parts of a message: text, image, file, or audio.
+/// Parts of a message: text, image, video, file, or audio.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentType {
@@ -100,6 +100,8 @@ pub enum ContentType {
     InputText(InputText),
     /// An image input to the model.
     InputImage(InputImage),
+    /// A video input to the model.
+    InputVideo(InputVideo),
     /// A file input to the model.
     InputFile(InputFile),
 }
@@ -127,6 +129,26 @@ pub struct InputImage {
     /// in a data URL.
     #[serde(skip_serializing_if = "Option::is_none")]
     image_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[builder(
+    name = "InputVideoArgs",
+    pattern = "mutable",
+    setter(into, strip_option),
+    default
+)]
+#[builder(build_fn(error = "OpenAIError"))]
+pub struct InputVideo {
+    /// The detail level of the video to be sent to the model.
+    detail: ImageDetail,
+    /// The ID of the file to be sent to the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_id: Option<String>,
+    /// The URL of the video to be sent to the model. A fully qualified URL or base64 encoded video
+    /// in a data URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    video_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
@@ -210,14 +232,9 @@ pub struct CreateResponse {
     /// Any further attempts to call a tool by the model will be ignored.
     pub max_tool_calls: Option<u32>,
 
-    /// Set of 16 key-value pairs that can be attached to an object. This can be
-    /// useful for storing additional information about the object in a structured
-    /// format, and querying for objects via API or the dashboard.
-    ///
-    /// Keys are strings with a maximum length of 64 characters. Values are
-    /// strings with a maximum length of 512 characters.
+    /// Arbitrary JSON metadata used as a passthrough parameter
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<HashMap<String, String>>,
+    pub metadata: Option<serde_json::Value>,
 
     /// Whether to allow the model to run tool calls in parallel.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1365,7 +1382,7 @@ pub struct Response {
 
     /// Metadata tags/values that were attached to this response.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<HashMap<String, String>>,
+    pub metadata: Option<serde_json::Value>,
 
     /// Model ID used to generate the response.
     pub model: String,
@@ -2099,7 +2116,7 @@ pub struct ResponseMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<HashMap<String, String>>,
+    pub metadata: Option<serde_json::Value>,
     /// Prompt cache key for improved performance
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,

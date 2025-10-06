@@ -110,7 +110,7 @@ rules:
 - apiGroups:
   - grove.io
   resources:
-  - podgangsets
+  - podcliquesets
   verbs:
   - create
   - delete
@@ -185,6 +185,13 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - scheduling.run.ai
+  resources:
+  - queues
+  verbs:
+  - get
+  - list
 - apiGroups:
   - scheduling.volcano.sh
   resources:
