@@ -205,12 +205,14 @@ pub async fn start_kv_router_background(
 
                     let key = String::from_utf8_lossy(kv.key());
 
-                    let Some(worker_id_str) = key.split('/').next_back() else {
+                    // Extract the hex worker ID after the colon (e.g., "generate:694d99badb9f7c07" -> "694d99badb9f7c07")
+                    let Some(worker_id_str) = key.split(':').next_back() else {
                         tracing::warn!("Could not extract worker ID from instance key: {}", key);
                         continue;
                     };
 
-                    let Ok(worker_id) = worker_id_str.parse::<i64>() else {
+                    // Parse as hexadecimal (base 16)
+                    let Ok(worker_id) = i64::from_str_radix(worker_id_str, 16) else {
                         tracing::warn!("Could not parse worker ID from instance key: {}", key);
                         continue;
                     };
@@ -300,7 +302,16 @@ pub async fn start_kv_router_background(
                     let key = String::from_utf8_lossy(kv.key());
                     tracing::info!("Router deleted: {}", key);
 
-                    // Extract the router UUID from the key (format: kv_routers/<model>/<uuid>)
+                    // Only process deletions for routers on the same component
+                    if !key.contains(component.path().as_str()) {
+                        tracing::trace!(
+                            "Skipping router deletion from different component (key: {key}, subscriber component: {})",
+                            component.path()
+                        );
+                        continue;
+                    }
+
+                    // Extract the router UUID from the key
                     let Some(router_uuid) = key.split('/').next_back() else {
                         tracing::warn!("Could not extract UUID from router key: {}", key);
                         continue;
@@ -363,6 +374,8 @@ async fn purge_then_snapshot(
     // Purge before snapshot ensures new/warm-restarted routers won't replay already-acknowledged messages.
     // Since KV events are idempotent, this ordering reduces unnecessary reprocessing while maintaining
     // at-least-once delivery guarantees. The snapshot will capture the clean state after purge.
+    tracing::info!("Purging acknowledged messages and performing snapshot of radix tree");
+    let start_time = std::time::Instant::now();
 
     // First, purge acknowledged messages from the stream
     nats_queue.purge_acknowledged().await?;
@@ -395,9 +408,10 @@ async fn purge_then_snapshot(
         .map_err(|e| anyhow::anyhow!("Failed to upload snapshot: {e:?}"))?;
 
     tracing::info!(
-        "Successfully uploaded radix tree snapshot with {} events to bucket {}",
+        "Successfully performed snapshot of radix tree with {} events to bucket {} in {}ms",
         events.len(),
-        resources.bucket_name
+        resources.bucket_name,
+        start_time.elapsed().as_millis()
     );
 
     Ok(())

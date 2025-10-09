@@ -101,7 +101,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## 2. Select an engine
 
-We publish Python wheels specialized for each of our supported engines: vllm, sglang, trtllm, and llama.cpp. The examples that follow use SGLang; continue reading for other engines.
+We publish Python wheels specialized for each of our supported engines: vllm, sglang, and trtllm. The examples that follow use SGLang; continue reading for other engines.
 
 ```
 uv venv venv
@@ -113,6 +113,16 @@ uv pip install "ai-dynamo[sglang]"  #replace with [vllm], [trtllm], etc.
 ```
 
 ## 3. Run Dynamo
+
+### Sanity check (optional)
+
+Before trying out Dynamo, you can verify your system configuration and dependencies:
+
+```bash
+./deploy/sanity_check.py
+```
+
+This is a quick check for system resources, development tools, LLM frameworks, and Dynamo components.
 
 ### Running an LLM API server
 
