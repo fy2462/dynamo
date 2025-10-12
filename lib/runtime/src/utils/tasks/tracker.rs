@@ -383,7 +383,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::metrics::MetricsRegistry;
+use crate::metrics::MetricsHierarchy;
 use crate::metrics::prometheus_names::task_tracker;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -1554,41 +1554,39 @@ impl PrometheusTaskMetrics {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new<R: MetricsRegistry + ?Sized>(
-        registry: &R,
-        component_name: &str,
-    ) -> anyhow::Result<Self> {
-        let issued_counter = registry.create_intcounter(
+    pub fn new<R: MetricsHierarchy>(registry: &R, component_name: &str) -> anyhow::Result<Self> {
+        let metrics = registry.metrics();
+        let issued_counter = metrics.create_intcounter(
             &format!("{}_{}", component_name, task_tracker::TASKS_ISSUED_TOTAL),
             "Total number of tasks issued/submitted",
             &[],
         )?;
 
-        let started_counter = registry.create_intcounter(
+        let started_counter = metrics.create_intcounter(
             &format!("{}_{}", component_name, task_tracker::TASKS_STARTED_TOTAL),
             "Total number of tasks started",
             &[],
         )?;
 
-        let success_counter = registry.create_intcounter(
+        let success_counter = metrics.create_intcounter(
             &format!("{}_{}", component_name, task_tracker::TASKS_SUCCESS_TOTAL),
             "Total number of successfully completed tasks",
             &[],
         )?;
 
-        let cancelled_counter = registry.create_intcounter(
+        let cancelled_counter = metrics.create_intcounter(
             &format!("{}_{}", component_name, task_tracker::TASKS_CANCELLED_TOTAL),
             "Total number of cancelled tasks",
             &[],
         )?;
 
-        let failed_counter = registry.create_intcounter(
+        let failed_counter = metrics.create_intcounter(
             &format!("{}_{}", component_name, task_tracker::TASKS_FAILED_TOTAL),
             "Total number of failed tasks",
             &[],
         )?;
 
-        let rejected_counter = registry.create_intcounter(
+        let rejected_counter = metrics.create_intcounter(
             &format!("{}_{}", component_name, task_tracker::TASKS_REJECTED_TOTAL),
             "Total number of rejected tasks",
             &[],
@@ -2064,7 +2062,7 @@ impl TaskTracker {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new_with_prometheus<R: MetricsRegistry + ?Sized>(
+    pub fn new_with_prometheus<R: MetricsHierarchy>(
         scheduler: Arc<dyn TaskScheduler>,
         error_policy: Arc<dyn OnErrorPolicy>,
         registry: &R,
