@@ -16,12 +16,12 @@ Current guides and where they should go:
 
 | Current File | Correct Location | Reason |
 |-------------|------------------|---------|
-| `guides/backend.md` | `development/backend-guide.md` | Developer guide for writing backends |
-| `guides/disagg_perf_tuning.md` | `performance/tuning.md` | Performance optimization |
+| `development/backend-guide.md` | `development/backend-guide.md` | Developer guide for writing backends |
+| `performance/tuning.md` | `performance/tuning.md` | Performance optimization |
 | `guides/dynamo_run.md` | `reference/cli.md` | CLI tool reference |
-| `guides/health_check.md` | `observability/health-checks.md` | Monitoring/observability |
-| `guides/logging.md` | `observability/logging.md` | Monitoring/observability |
-| `guides/metrics.md` | `observability/metrics.md` | Monitoring/observability |
+| `observability/health-checks.md` | `observability/health-checks.md` | Monitoring/observability |
+| `observability/logging.md` | `observability/logging.md` | Monitoring/observability |
+| `observability/metrics.md` | `observability/metrics.md` | Monitoring/observability |
 | `guides/run_kvbm_in_trtllm.md` | `backends/trtllm/kvbm.md` | Backend-specific feature |
 | `guides/run_kvbm_in_vllm.md` | `backends/vllm/kvbm.md` | Backend-specific feature |
 | `guides/tool_calling.md` | `guides/tool-calling.md` | Keep - genuine how-to guide |
@@ -31,11 +31,11 @@ Observability docs exist in multiple places:
 
 | File | Location | Action |
 |------|----------|--------|
-| `guides/metrics.md` | General metrics guide | Move to `observability/` |
+| `observability/metrics.md` | General metrics guide | Move to `observability/` |
 | `kubernetes/metrics.md` | K8s-specific metrics | Keep in kubernetes/ |
-| `guides/logging.md` | General logging guide | Move to `observability/` |
+| `observability/logging.md` | General logging guide | Move to `observability/` |
 | `kubernetes/logging.md` | K8s-specific logging | Keep in kubernetes/ |
-| `guides/health_check.md` | Health checks guide | Move to `observability/` |
+| `observability/health-checks.md` | Health checks guide | Move to `observability/` |
 
 ### 4. **Thin `components/` Directory**
 - Only has `router/` with 1 README
@@ -47,8 +47,8 @@ Observability docs exist in multiple places:
 - Should be removed from `/docs` (deployment artifacts in root `/deploy/`)
 
 ### 6. **Root-Level Reference Files**
-- `dynamo_glossary.md` at root
-- `support_matrix.md` at root
+- `reference/glossary.md` at root
+- `reference/support-matrix.md` at root
 - Should be organized under `reference/`
 
 ---
@@ -72,20 +72,20 @@ mkdir -p docs/reference
 
 #### 1.3 Move observability content
 ```bash
-mv docs/guides/health_check.md docs/observability/health-checks.md
-mv docs/guides/logging.md docs/observability/logging.md
-mv docs/guides/metrics.md docs/observability/metrics.md
+mv docs/observability/health-checks.md docs/observability/health-checks.md
+mv docs/observability/logging.md docs/observability/logging.md
+mv docs/observability/metrics.md docs/observability/metrics.md
 ```
 
 #### 1.4 Move development content
 ```bash
-mv docs/guides/backend.md docs/development/backend-guide.md
+mv docs/development/backend-guide.md docs/development/backend-guide.md
 mv docs/runtime/README.md docs/development/runtime-guide.md
 ```
 
 #### 1.5 Move performance content
 ```bash
-mv docs/guides/disagg_perf_tuning.md docs/performance/tuning.md
+mv docs/performance/tuning.md docs/performance/tuning.md
 ```
 
 #### 1.6 Move backend-specific guides
@@ -97,8 +97,8 @@ mv docs/guides/run_kvbm_in_trtllm.md docs/backends/trtllm/kvbm-setup.md
 #### 1.7 Move reference content
 ```bash
 mv docs/guides/dynamo_run.md docs/reference/cli.md
-mv docs/dynamo_glossary.md docs/reference/glossary.md
-mv docs/support_matrix.md docs/reference/support-matrix.md
+mv docs/reference/glossary.md docs/reference/glossary.md
+mv docs/reference/support-matrix.md docs/reference/support-matrix.md
 ```
 
 #### 1.8 Keep useful guides
@@ -160,12 +160,12 @@ docs/
 │   └── metrics.md            ← FROM guides/
 │
 ├── performance/              [NEW]
-│   └── tuning.md             ← FROM guides/disagg_perf_tuning.md
+│   └── tuning.md             ← FROM performance/tuning.md
 │
 ├── reference/                [NEW]
 │   ├── cli.md                ← FROM guides/dynamo_run.md
-│   ├── glossary.md           ← FROM root dynamo_glossary.md
-│   └── support-matrix.md     ← FROM root support_matrix.md
+│   ├── glossary.md           ← FROM root reference/glossary.md
+│   └── support-matrix.md     ← FROM root reference/support-matrix.md
 │
 ├── conf.py                   [Unchanged]
 ├── hidden_toctree.rst        [Update links]
@@ -195,12 +195,12 @@ docs/
 
 ### Link Update Strategy:
 ```bash
-# Example: Update references to old guides/backend.md
+# Example: Update references to old development/backend-guide.md
 find docs -name "*.md" -o -name "*.rst" | xargs sed -i '' 's|guides/backend\.md|development/backend-guide.md|g'
 
 # Update API → api
-find docs -name "*.md" -o -name "*.rst" | xargs sed -i '' 's|/API/|/api/|g'
-find docs -name "*.md" -o -name "*.rst" | xargs sed -i '' 's|(API/|(api/|g'
+find docs -name "*.md" -o -name "*.rst" | xargs sed -i '' 's|/api/|/api/|g'
+find docs -name "*.md" -o -name "*.rst" | xargs sed -i '' 's|(api/|(api/|g'
 
 # Update root reference files
 find docs -name "*.md" -o -name "*.rst" | xargs sed -i '' 's|dynamo_glossary\.md|reference/glossary.md|g'

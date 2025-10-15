@@ -35,11 +35,11 @@ docs/
 ├── runtime/                  (1 doc) - Runtime development guide
 │
 ├── conf.py                   # Sphinx configuration
-├── dynamo_glossary.md        # Glossary (root level)
+├── reference/glossary.md        # Glossary (root level)
 ├── hidden_toctree.rst        # Hidden pages navigation
 ├── index.rst                 # Main entry point
 ├── README.md                 # Build instructions
-├── support_matrix.md         # Platform support matrix
+├── reference/support-matrix.md         # Platform support matrix
 ├── Makefile                  # Documentation build commands
 ├── generate_docs.py          # Doc generation script
 └── exclusions.txt            # Doc exclusion patterns
@@ -80,8 +80,8 @@ Contains 9 mixed guides that belong in specific sections:
 - `examples/` unclear if this belongs in `/docs` or root `/examples`
 
 ### 6. **Duplicate Root Files**
-- `dynamo_glossary.md` at root vs potential `reference/glossary.md`
-- `support_matrix.md` at root vs potential `reference/support-matrix.md`
+- `reference/glossary.md` at root vs potential `reference/glossary.md`
+- `reference/support-matrix.md` at root vs potential `reference/support-matrix.md`
 
 ### 7. **Missing Documentation Sections**
 No organized sections for:
@@ -189,7 +189,7 @@ docs/
 **Phase 1** (Immediate):
 1. Move `kubernetes/` → `deployment/kubernetes/`
 2. Rename `API/` → `api/`
-3. Move root `dynamo_glossary.md` and `support_matrix.md` to `reference/`
+3. Move root `reference/glossary.md` and `reference/support-matrix.md` to `reference/`
 4. Update `index.rst` navigation
 
 **Phase 2** (Near-term):

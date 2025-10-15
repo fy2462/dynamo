@@ -42,7 +42,7 @@ Quickstart
 
    Quickstart <self>
    Installation <_sections/installation>
-   Support Matrix <support_matrix.md>
+   Support Matrix <reference/support-matrix.md>
    Architecture <_sections/architecture>
    Examples <_sections/examples>
 
@@ -73,8 +73,8 @@ Quickstart
 
    Benchmarking Guide <benchmarks/benchmarking.md>
    SLA Planner (Autoscaling) Quickstart <kubernetes/sla_planner_quickstart>
-   Logging <guides/logging.md>
-   Health Checks <guides/health_check.md>
-   Tuning Disaggregated Serving Performance <guides/disagg_perf_tuning.md>
-   Writing Python Workers in Dynamo <guides/backend.md>
-   Glossary <dynamo_glossary.md>
+   Logging <observability/logging.md>
+   Health Checks <observability/health-checks.md>
+   Tuning Disaggregated Serving Performance <performance/tuning.md>
+   Writing Python Workers in Dynamo <development/backend-guide.md>
+   Glossary <reference/glossary.md>
