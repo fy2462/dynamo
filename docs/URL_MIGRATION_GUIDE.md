@@ -94,10 +94,10 @@ NEW: /docs/performance/tuning.md
 
 ```
 OLD: /docs/guides/run_kvbm_in_vllm.md
-NEW: /docs/backends/vllm/kvbm-setup.md
+NEW: /docs/kvbm/vllm-setup.md
 
 OLD: /docs/guides/run_kvbm_in_trtllm.md
-NEW: /docs/backends/trtllm/kvbm-setup.md
+NEW: /docs/kvbm/trtllm-setup.md
 ```
 **Impact**: 2 files
 **Reason**: Co-located with backend documentation
@@ -163,8 +163,8 @@ Updated references to:
 | `docs/guides/logging.md` | `docs/observability/logging.md` | ✅ Moved |
 | `docs/guides/metrics.md` | `docs/observability/metrics.md` | ✅ Moved |
 | `docs/guides/disagg_perf_tuning.md` | `docs/performance/tuning.md` | ✅ Moved |
-| `docs/guides/run_kvbm_in_vllm.md` | `docs/backends/vllm/kvbm-setup.md` | ✅ Moved |
-| `docs/guides/run_kvbm_in_trtllm.md` | `docs/backends/trtllm/kvbm-setup.md` | ✅ Moved |
+| `docs/guides/run_kvbm_in_vllm.md` | `docs/kvbm/vllm-setup.md` | ✅ Moved |
+| `docs/guides/run_kvbm_in_trtllm.md` | `docs/kvbm/trtllm-setup.md` | ✅ Moved |
 | `docs/guides/dynamo_run.md` | `docs/reference/cli.md` | ✅ Moved |
 | `docs/guides/tool_calling.md` | `docs/guides/tool-calling.md` | ✅ Renamed |
 | `docs/dynamo_glossary.md` | `docs/reference/glossary.md` | ✅ Moved |
@@ -202,7 +202,7 @@ These documentation areas were **NOT** changed:
 ✅ `/docs/backends/` - Backend guides location unchanged (only added files)
 ✅ `/docs/benchmarks/` - Benchmarking guides unchanged
 ✅ `/docs/kubernetes/` - Kubernetes docs remain at root level
-✅ `/docs/components/router/` - Component docs unchanged
+✅ `/docs/router/` - Component docs unchanged
 ✅ `/docs/examples/` - Examples unchanged
 
 ---

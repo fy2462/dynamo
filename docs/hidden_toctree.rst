@@ -34,12 +34,12 @@
    kubernetes/README.md
    reference/cli.md
    observability/metrics.md
-   backends/vllm/kvbm-setup.md
-   backends/trtllm/kvbm-setup.md
+   kvbm/vllm-setup.md
+   kvbm/trtllm-setup.md
    guides/tool-calling.md
 
    architecture/kv_cache_routing.md
-   architecture/load_planner.md
+   planner/load_planner.md
    architecture/request_migration.md
    architecture/request_cancellation.md
 

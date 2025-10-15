@@ -63,9 +63,9 @@ Quickstart
    :caption: Components
 
    Backends <_sections/backends>
-   Router <components/router/README>
-   Planner <architecture/planner_intro>
-   KVBM <architecture/kvbm_intro>
+   Router <router/README>
+   Planner <planner/planner_intro>
+   KVBM <kvbm/kvbm_intro>
 
 .. toctree::
    :hidden:

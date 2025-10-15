@@ -90,8 +90,8 @@ mv docs/performance/tuning.md docs/performance/tuning.md
 
 #### 1.6 Move backend-specific guides
 ```bash
-mv docs/guides/run_kvbm_in_vllm.md docs/backends/vllm/kvbm-setup.md
-mv docs/guides/run_kvbm_in_trtllm.md docs/backends/trtllm/kvbm-setup.md
+mv docs/guides/run_kvbm_in_vllm.md docs/kvbm/vllm-setup.md
+mv docs/guides/run_kvbm_in_trtllm.md docs/kvbm/trtllm-setup.md
 ```
 
 #### 1.7 Move reference content
