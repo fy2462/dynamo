@@ -13,3 +13,17 @@ roleRef:
   kind: Role
   name: dynamo-role
   apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dynamo-sa-nodes-reader-binding-${NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dynamo-sa-nodes-reader
+subjects:
+- kind: ServiceAccount
+  name: dynamo-sa
+  namespace: ${NAMESPACE}
