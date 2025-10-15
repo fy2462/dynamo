@@ -308,4 +308,4 @@ For detailed instructions on running comprehensive performance sweeps across bot
 
 Dynamo with TensorRT-LLM currently supports integration with the Dynamo KV Block Manager. This integration can significantly reduce time-to-first-token (TTFT) latency, particularly in usage patterns such as multi-turn conversations and repeated long-context requests.
 
-Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/guides/run_kvbm_in_trtllm.md) .
+Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/kvbm/trtllm-setup.md) .
