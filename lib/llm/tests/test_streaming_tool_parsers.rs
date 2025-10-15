@@ -1,6 +1,31 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+/*
+
+- Primary reason these tests were added is because we wanted to iterate quickly
+  with concrete examples (rather than speculative fixtures), these tests catch
+  regressions caused by backend chunk boundaries or minor field differences even
+  when the overall protocol is the same.
+
+- The "vllm" / "sglang" labels are not parser-specific logic. They only indicate
+  the recorded source of the streaming chunks under tests/data. Different serving
+  frameworks can vary chunk granularity and some envelope details (e.g., TRT-LLM
+  often emits bigger deltas). Our parsing must be robust to these variations, so
+  we validate against multiple real-world backends.
+
+- These tests run through our full streaming parsing pipeline. We feed captured,
+  production-like chunks into tool call parsing, then assert the aggregated
+  reasoning content, final content, and tool-calls. This provides broader
+  coverage than narrowly scoped unit tests of helpers and gives quick confidence
+  when we tweak parsers (Harmony/Hermes/Qwen/Nemotron, etc.).
+
+- To add another backend (e.g., trt-llm), record its streams under
+tests/data/<backend>/... and mirror one of the existing tests so invariants hold
+across backends.
+
+*/
+
 use dynamo_async_openai::types::ChatChoiceStream;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
