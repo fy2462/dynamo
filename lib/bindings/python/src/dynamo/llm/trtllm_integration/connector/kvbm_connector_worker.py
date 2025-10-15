@@ -34,11 +34,15 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         self._connector = RustKvConnectorWorker(self.drt, str(self.rank))
         self.event = torch.cuda.Event()
 
+        # Default to old way of processing offload
+        self.use_forward_pass_callable = False
+
     def register_forward_pass_callable(self) -> callable:
         """
         Register a callable object which will be called at the
         end of the forward pass.
         """
+        self.use_forward_pass_callable = True
         return self._callable_object()
     
     def register_kv_caches(self, kv_cache_tensor: torch.Tensor):
@@ -121,12 +125,10 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
             layer_idx: The index of the layer to save.
             stream: The stream the forward pass is being executed on.
         """
-        # TODO: Re-enbable this once we implement layerwise offloading. 
-        # For now, disable to not collide with KVBMForwardPassCallback.
-        #
-        # self.events[layer_idx].record(stream)
-        # self._connector.save_kv_layer(layer_idx)
-        pass
+        # This is a WAR to not collide with registering a forward_pass_callable
+        if not self.use_forward_pass_callable:
+            self.events[layer_idx].record(stream)
+            self._connector.save_kv_layer(layer_idx)
 
     def get_finished(
         self, finished_gen_req_ids: list[int], started_loading_req_ids: list[int]
