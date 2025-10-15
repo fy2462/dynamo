@@ -270,7 +270,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 # Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
 ARG ARCH_ALT
 
-FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
+FROM docker.io/library/nixl:v0.1.0.dev.c31b9be AS wheel_builder
 
 # Redeclare ARGs for this stage
 ARG ARCH
@@ -290,7 +290,7 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
     CARGO_HOME=/usr/local/cargo \
     CARGO_TARGET_DIR=/opt/dynamo/target \
     VIRTUAL_ENV=/opt/dynamo/venv \
-    NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_PREFIX=/usr/local/nixl \
     PATH=/usr/local/cargo/bin:/opt/dynamo/venv/bin:$PATH
 
 # Install system dependencies
@@ -321,7 +321,6 @@ ENV PROTOC=/usr/local/bin/protoc
 # Copy artifacts from base stage
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
-COPY --from=base $NIXL_PREFIX $NIXL_PREFIX
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
 
 # Install SCCACHE if requested
@@ -337,6 +336,7 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 
 # Copy source code (order matters for layer caching)
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
+COPY launch/ /opt/dynamo/launch/
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
@@ -344,18 +344,11 @@ COPY components/ /opt/dynamo/components/
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
-    uv build --wheel --out-dir /opt/dynamo/dist && \
-    cd /opt/dynamo/lib/bindings/python && \
+    mkdir -p /opt/dynamo/lib/kvbm/python/kvbm/nixl-cu13 && \
+    cp -r /usr/local/nixl/lib64/* /opt/dynamo/lib/kvbm/python/kvbm/nixl-cu13/ && \
+    cd /opt/dynamo/lib/kvbm && \
     uv pip install maturin[patchelf] && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        maturin build --release --features block-manager --out /opt/dynamo/dist; \
-    else \
-        maturin build --release --out /opt/dynamo/dist; \
-    fi && \
-    if [ "$RELEASE_BUILD" = "true" ]; then \
-        uv run --python 3.11 maturin build --release --out /opt/dynamo/dist && \
-        uv run --python 3.10 maturin build --release --out /opt/dynamo/dist; \
-    fi && \
+    maturin build --release --out /opt/dynamo/dist && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
 ##############################################
@@ -377,14 +370,6 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
 # Install Python packages
 COPY benchmarks/ /opt/dynamo/benchmarks/
-RUN uv pip install \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    && cd /opt/dynamo/benchmarks \
-    && uv pip install . \
-    && cd - \
-    && rm -rf /opt/dynamo/benchmarks
 
 # Setup launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \

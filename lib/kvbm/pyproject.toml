@@ -16,7 +16,7 @@
 
 [project]
 name = "kvbm"
-version = "0.1.0"
+version = "0.1.1"
 description = "Dynamo KV Block Manager"
 readme = "README.md"
 authors = [
@@ -46,6 +46,9 @@ module-name = "kvbm._core"
 manifest-path = "Cargo.toml"
 python-packages = ["kvbm"]
 python-source = "python"
+include = [
+  { path = "kvbm/nixl-cu13/**/*", format = "wheel" }
+]
 
 [build-system]
 requires = ["maturin>=1.0,<2.0", "patchelf"]
