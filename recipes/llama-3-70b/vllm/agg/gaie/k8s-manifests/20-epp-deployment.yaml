@@ -38,7 +38,7 @@ spec:
 
       containers:
         - name: epp
-          image: "nvcr.io/nvstaging/ai-dynamo/gaie-epp-dynamo:v0.6.0-1"
+          image: "gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:etcdless-2"
           imagePullPolicy: IfNotPresent
           resources:
             requests:
@@ -100,10 +100,10 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
 
-    volumes:
-      - name: epp-config
-        configMap:
-          name: epp-config
-          items:
-            - key: epp-config-dynamo.yaml
-              path: epp-config-dynamo.yaml
+      volumes:
+        - name: epp-config
+          configMap:
+            name: epp-config
+            items:
+              - key: epp-config-dynamo.yaml
+                path: epp-config-dynamo.yaml

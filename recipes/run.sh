@@ -14,6 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -euo pipefail
+IFS=$'\n\t'
+
 RECIPES_DIR="$( cd "$( dirname "$0" )" && pwd )"
 # Default values
 NAMESPACE="${NAMESPACE:-dynamo}"
@@ -43,6 +46,7 @@ usage() {
     echo "  --namespace <ns>   Kubernetes namespace (default: dynamo)"
     echo "  --skip-model-cache Skip model downloading (assumes model cache already exists)"
     echo "  --dry-run          Print commands without executing them"
+    echo "  --gaie[=true|false] Enable GAIE integration subfolder (runs its deploy.sh and skips benchmark) (default: ${GAIE})"
     echo "  -h, --help         Show this help message"
     echo ""
     echo "Environment Variables:"
@@ -99,10 +103,22 @@ while [[ $# -gt 0 ]]; do
                 missing_requirement "$1"
             fi
             ;;
-+       --gaie)
-+            GAIE=true
-+            shift
-+            ;;
+        --gaie)
+            GAIE=true
+            shift
+            ;;
+        --gaie=false)
+            GAIE=false
+            shift
+            ;;
+        --gaie=*)
+            GAIE="${1#*=}"
+            case "${GAIE,,}" in
+              true|false) GAIE="${GAIE,,}";;
+              *) echo "ERROR: --gaie must be true or false"; exit 1;;
+            esac
+            shift
+            ;;
         -h|--help)
             usage
             ;;
@@ -147,7 +163,7 @@ fi
 MODEL_DIR="$RECIPES_DIR/$MODEL"
 FRAMEWORK_DIR="$MODEL_DIR/${FRAMEWORK,,}"
 DEPLOY_PATH="$FRAMEWORK_DIR/$DEPLOY_TYPE"
-INTEGRATION="$([[ "$GAIE" == "true" ]] && echo gaie || echo "")"
+INTEGRATION="$([[ "${GAIE,,}" == "true" ]] && echo gaie || echo "")"
 INTEGRATION_PATH="$DEPLOY_PATH/$INTEGRATION"
 INTEG_DEPLOY_SCRIPT="$INTEGRATION_PATH/deploy.sh"
 
@@ -198,6 +214,7 @@ echo "Framework: ${FRAMEWORK,,}"
 echo "Deployment Type: $DEPLOY_TYPE"
 echo "Namespace: $NAMESPACE"
 echo "Model Download: $DOWNLOAD_MODEL"
+echo "GAIE integration: $GAIE"
 echo "======================================"
 
 # Handle model downloading
@@ -209,7 +226,7 @@ if [[ "$DOWNLOAD_MODEL" == "true" ]]; then
 
     # Wait for the model download to complete
     echo "Waiting for the model download to complete..."
-    $DRY_RUN kubectl wait --for=condition=Complete job/model-download-${MODEL} -n $NAMESPACE --timeout=6000s
+    $DRY_RUN kubectl wait --for=condition=Complete job/model-download -n $NAMESPACE --timeout=6000s
 else
     echo "Skipping model download (using existing model cache)..."
     # Still create the PVC in case it doesn't exist
@@ -230,7 +247,7 @@ if [[ "$INTEGRATION" == "gaie" ]]; then
     fi
     # For now do not run the benchmark
     exit
-fi
+ fi
 
 # Launch the benchmark job
 echo "Launching benchmark job..."

@@ -33,7 +33,6 @@ need kubectl
 
 # ===== Config (env overridable) =====
 : "${NAMESPACE:=dynamo}"
-: "${EPP_IMAGE:?EPP_IMAGE must be set, e.g. nvcr.io/your/epp:tag}"
 
 # ===== Pre-flight checks =====
 command -v helm >/dev/null 2>&1 || { echo "ERROR: helm not found"; exit 1; }
