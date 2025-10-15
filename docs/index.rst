@@ -72,7 +72,7 @@ Quickstart
    :caption: Developer Guide
 
    Benchmarking Guide <benchmarks/benchmarking.md>
-   SLA Planner (Autoscaling) Quickstart <kubernetes/sla_planner_quickstart>
+   SLA Planner (Autoscaling) Quickstart <planner/sla_planner_quickstart>
    Logging <observability/logging.md>
    Health Checks <observability/health-checks.md>
    Tuning Disaggregated Serving Performance <performance/tuning.md>
