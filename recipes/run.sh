@@ -229,8 +229,17 @@ if [[ "$DOWNLOAD_MODEL" == "true" ]]; then
     $DRY_RUN kubectl wait --for=condition=Complete job/model-download -n $NAMESPACE --timeout=6000s
 else
     echo "Skipping model download (using existing model cache)..."
-    # Still create the PVC in case it doesn't exist
-    $DRY_RUN kubectl apply -n $NAMESPACE -f $MODEL_CACHE_DIR/model-cache.yaml
+    # Create PVC only if it does not exist
+    if [ -z "${DRY_RUN:-}" ]; then
+      if ! kubectl get pvc model-cache -n "$NAMESPACE" >/dev/null 2>&1; then
+        echo "PVC model-cache not found; creating it…"
+        kubectl apply -n "$NAMESPACE" -f "$MODEL_CACHE_DIR/model-cache.yaml"
+      else
+        echo "PVC model-cache already exists; leaving it unchanged."
+      fi
+    else
+      echo "DRY RUN: would ensure PVC model-cache exists"
+    fi
 fi
 
 # Deploy the specified configuration

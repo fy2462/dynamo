@@ -32,8 +32,7 @@ Update the `hf-token-secret.yaml` file with your HuggingFace token.
 kubectl apply -f hf_hub_secret/hf_hub_secret.yaml -n ${NAMESPACE}
 ```
 
-6. (Optional) Create a shared model cache pvc to store the model weights.
-Choose a storage class to create the model cache pvc. You'll need to use this storage class name to update the `storageClass` field in the model-cache/model-cache.yaml file.
+6. Choose a storage class to create the model cache pvc. You'll need to use this storage class name to update the `storageClass` field in the model-cache/model-cache.yaml file. (Optional) Create a shared model cache pvc to store the model weights. If not, the script below will create it for you. If you created it manually, pass `--skip-model-cache` to the script below.
 
 ```bash
 kubectl get storageclass
