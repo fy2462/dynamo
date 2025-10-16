@@ -1774,8 +1774,6 @@ fahrenheit
             .await
             .unwrap();
 
-        println!("result: {:?}", result);
-        println!("content: {:?}", _content);
 
         // Harmony parser might handle this differently, so we check for at least one tool call
         assert!(!result.is_empty(), "Should parse at least one tool call");
