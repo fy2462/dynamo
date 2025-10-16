@@ -132,7 +132,11 @@ def break_arguments(args: list[str] | None) -> list[str]:
             if arg is not None:
                 # If the arg looks like it might be JSON (starts with { or [) or is already a single token,
                 # don't split it further. Only split if it contains spaces AND doesn't look like JSON.
-                if isinstance(arg, str) and (" " in arg or "\t" in arg) and not (arg.strip().startswith(("{", "["))):
+                if (
+                    isinstance(arg, str)
+                    and (" " in arg or "\t" in arg)
+                    and not (arg.strip().startswith(("{", "[")))
+                ):
                     # Use shlex.split to properly handle quoted arguments
                     ans.extend(shlex.split(arg))
                 else:
@@ -976,7 +980,9 @@ class TrtllmConfigModifier:
             # - Disable enable_block_reuse (no KV reuse for prefill-only)
             # - Enable overlap scheduler (disabled in prefill.yaml but needed for agg)
             # - Remove cache_transceiver_config (not needed in agg mode)
-            if "kv_cache_config" not in override_dict or not isinstance(override_dict["kv_cache_config"], dict):
+            if "kv_cache_config" not in override_dict or not isinstance(
+                override_dict["kv_cache_config"], dict
+            ):
                 override_dict["kv_cache_config"] = {}
             override_dict["kv_cache_config"]["enable_block_reuse"] = False
             override_dict[
@@ -1027,7 +1033,9 @@ class TrtllmConfigModifier:
             # Merge our overrides for converting decode-only disagg to aggregated:
             # - Enable enable_block_reuse (to skip prefill in decode-only)
             # - Remove cache_transceiver_config (not needed in agg mode)
-            if "kv_cache_config" not in override_dict or not isinstance(override_dict["kv_cache_config"], dict):
+            if "kv_cache_config" not in override_dict or not isinstance(
+                override_dict["kv_cache_config"], dict
+            ):
                 override_dict["kv_cache_config"] = {}
             override_dict["kv_cache_config"]["enable_block_reuse"] = True
             override_dict[
