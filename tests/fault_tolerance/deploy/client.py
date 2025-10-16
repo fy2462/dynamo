@@ -180,9 +180,7 @@ def wait_for_model_availability(
             logger.info(f"Waiting {wait_time}s before retry...")
             time.sleep(wait_time)
 
-    logger.warning(
-        "Could not confirm model availability after all attempts"
-    )
+    logger.warning("Could not confirm model availability after all attempts")
     return False
 
 
@@ -197,7 +195,7 @@ def validate_aiperf_results(
 ) -> bool:
     """
     Validate AI-Perf results from JSON output.
-    
+
     Args:
         json_path: Path to the AI-Perf JSON output file
         requests_per_client: Expected number of requests
@@ -206,32 +204,34 @@ def validate_aiperf_results(
         attempt_dir: Directory containing attempt results
         pod_name: Pod name for logging
         port: Port number for logging
-    
+
     Returns:
         True if the attempt was successful, False if it should be retried
     """
     if not json_path.exists():
         # No JSON output, but aiperf returned 0 - might be okay
-        logger.info(
-            f"Attempt {attempt + 1} completed (return code 0, no JSON output)"
-        )
+        logger.info(f"Attempt {attempt + 1} completed (return code 0, no JSON output)")
         log_summary_metrics(attempt_dir, logger, pod_name, port)
         return True
-    
+
     try:
-        with open(json_path, 'r') as f:
+        with open(json_path, "r") as f:
             aiperf_data = json.load(f)
-        
+
         # Check for errors in the output
         error_count = 0
-        if 'records' in aiperf_data and 'error_request_count' in aiperf_data['records']:
-            error_count = int(aiperf_data['records']['error_request_count'].get('avg', 0))
-        
+        if "records" in aiperf_data and "error_request_count" in aiperf_data["records"]:
+            error_count = int(
+                aiperf_data["records"]["error_request_count"].get("avg", 0)
+            )
+
         # Also check error_summary
-        if 'error_summary' in aiperf_data:
-            error_summary_count = sum(err.get('count', 0) for err in aiperf_data['error_summary'])
+        if "error_summary" in aiperf_data:
+            error_summary_count = sum(
+                err.get("count", 0) for err in aiperf_data["error_summary"]
+            )
             error_count = max(error_count, error_summary_count)
-        
+
         # Consider it a failure if most requests failed (> 90%)
         failure_threshold = requests_per_client * 0.9
         if error_count >= failure_threshold:
@@ -246,7 +246,7 @@ def validate_aiperf_results(
             )
             log_summary_metrics(attempt_dir, logger, pod_name, port)
             return True  # Successful
-            
+
     except Exception as e:
         logger.warning(f"Could not parse AI-Perf output to check for failures: {e}")
         # Assume success if we can't parse the output but aiperf returned 0
@@ -408,7 +408,7 @@ def run_aiperf(
                     logger=logger,
                     attempt_dir=attempt_dir,
                     pod_name=pod_name,
-                    port=port
+                    port=port,
                 )
                 if success:
                     break  # Success - exit the retry loop
