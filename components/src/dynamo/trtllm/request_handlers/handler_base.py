@@ -20,7 +20,7 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import AsyncGenerator, Optional, Union
+from typing import Any, AsyncGenerator, Optional, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
@@ -79,7 +79,7 @@ class RequestHandlerConfig:
     runtime: Optional[
         DistributedRuntime
     ] = None  # DistributedRuntime reference for graceful shutdown
-    metrics_collector: Optional[object] = None  # TensorRT-LLM MetricsCollector
+    metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
 
 
 class HandlerBase:
