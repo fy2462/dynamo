@@ -79,6 +79,7 @@ class RequestHandlerConfig:
     runtime: Optional[
         DistributedRuntime
     ] = None  # DistributedRuntime reference for graceful shutdown
+    metrics_collector: Optional[object] = None  # TensorRT-LLM MetricsCollector
 
 
 class HandlerBase:
@@ -91,6 +92,7 @@ class HandlerBase:
         self.component = config.component
         self.default_sampling_params = config.default_sampling_params
         self.publisher = config.publisher
+        self.metrics_collector = config.metrics_collector
         self.disaggregation_mode = config.disaggregation_mode
         self.disaggregation_strategy = config.disaggregation_strategy
         self.next_client = config.next_client
@@ -328,6 +330,17 @@ class HandlerBase:
                         logging.warning(
                             "Request finished with no finish reason set - this indicates a possible bug"
                         )
+
+                    # Log metrics to TensorRT-LLM MetricsCollector when request finishes
+                    if (
+                        res.finished
+                        and self.metrics_collector
+                        and hasattr(res, "metrics_dict")
+                    ):
+                        try:
+                            self.metrics_collector.log_metrics_dict(res.metrics_dict)
+                        except Exception as e:
+                            logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
 
                     # Yield the chunk to the client and update the token count for the next iteration.
                     yield out
