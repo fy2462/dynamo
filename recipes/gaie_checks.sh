@@ -84,8 +84,4 @@ kubectl get gateway.gateway.networking.k8s.io inference-gateway -n "$NAMESPACE" 
 
 ok "GAIE is installed and the gateway is up in namespace '$NAMESPACE'."
 
-# ===== Apply manifests =====
-kubectl apply -f ./k8s-manifests -n "$NAMESPACE"
-
-echo "Done."
 

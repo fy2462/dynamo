@@ -164,8 +164,6 @@ MODEL_DIR="$RECIPES_DIR/$MODEL"
 FRAMEWORK_DIR="$MODEL_DIR/${FRAMEWORK,,}"
 DEPLOY_PATH="$FRAMEWORK_DIR/$DEPLOY_TYPE"
 INTEGRATION="$([[ "${GAIE,,}" == "true" ]] && echo gaie || echo "")"
-INTEGRATION_PATH="$DEPLOY_PATH/$INTEGRATION"
-INTEG_DEPLOY_SCRIPT="$INTEGRATION_PATH/deploy.sh"
 
 # Check if model directory exists
 if [[ ! -d "$MODEL_DIR" ]]; then
@@ -247,13 +245,10 @@ echo "Deploying $MODEL ${FRAMEWORK,,} $DEPLOY_TYPE configuration..."
 $DRY_RUN kubectl apply -n $NAMESPACE -f $DEPLOY_FILE
 
 if [[ "$INTEGRATION" == "gaie" ]]; then
-    if [[ -x "$INTEG_DEPLOY_SCRIPT" ]]; then
-        $DRY_RUN "$INTEG_DEPLOY_SCRIPT"
-    else
-        echo "Error: Expected executable '$INTEG_DEPLOY_SCRIPT' for GAIE integration."
-        echo "Hint: create $INTEG_DEPLOY_SCRIPT and make it executable (chmod +x)."
-        exit 1
-    fi
+    # run gaie checks.
+    SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    "${SCRIPT_DIR}/gaie_checks.sh"
+    kubectl apply -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
     # For now do not run the benchmark
     exit
  fi
