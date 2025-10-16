@@ -313,26 +313,19 @@ def parse_aiperf_client_results(log_dir: str) -> Dict[str, Any]:
                 )
 
                 # Calculate total requests: successful + errors
-                # When both are present, request_count appears to only count successful
-                if successful_count > 0 and error_request_count > 0:
-                    request_count = successful_count + error_request_count
-                elif successful_count > 0:
-                    request_count = successful_count
-                elif error_request_count > 0:
-                    request_count = error_request_count
-                else:
-                    # Fall back to input config if no requests were recorded
-                    if "input_config" in client_metrics:
-                        loadgen_config = client_metrics.get("input_config", {}).get(
-                            "loadgen", {}
-                        )
-                        request_count = loadgen_config.get("request_count", 0)
-                    else:
-                        request_count = 0
+                # Note: request_count appears to only track successful requests when errors are present
+                request_count = successful_count + error_request_count
+
+                # Fall back to input config if no requests were recorded
+                if request_count == 0 and "input_config" in client_metrics:
+                    loadgen_config = client_metrics.get("input_config", {}).get(
+                        "loadgen", {}
+                    )
+                    request_count = loadgen_config.get("request_count", 0)
 
                 # Check for errors in error_summary
                 error_summary = client_metrics.get("error_summary", [])
-                # Sum up actual error counts from each error type (not just count types)
+                # Sum up actual error counts from each error type
                 error_count = sum(error.get("count", 0) for error in error_summary)
 
                 # Check if test was cancelled
