@@ -34,6 +34,10 @@ use tonic::Status;
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
+
+use inference::infer_parameter::ParameterChoice;
+
+
 /// Tensor Request Handler
 ///
 /// This method will handle the incoming request for model type tensor. The endpoint is a "source"
@@ -186,6 +190,51 @@ fn get_or_create_request_id(primary: Option<&str>) -> String {
     uuid.to_string()
 }
 
+/// Convert KServe InferParameter to Dynamo ParameterValue
+///
+/// # Arguments
+/// * `key` - Parameter name for error reporting
+/// * `param` - KServe parameter to convert
+///
+/// # Returns
+/// * `Ok(ParameterValue)` - Successfully converted parameter
+/// * `Err(Status)` - Parameter has no value (parameter_choice is None)
+fn kserve_param_to_dynamo(
+    key: &str,
+    param: &inference::InferParameter,
+) -> Result<tensor::ParameterValue, Status> {
+    param
+        .parameter_choice
+        .as_ref()
+        .ok_or_else(|| {
+            Status::invalid_argument(format!("Parameter '{}' has no value", key))
+        })
+        .map(|choice| match choice {
+            ParameterChoice::BoolParam(v) => tensor::ParameterValue::Bool(*v),
+            ParameterChoice::Int64Param(v) => tensor::ParameterValue::Int64(*v),
+            ParameterChoice::StringParam(v) => tensor::ParameterValue::String(v.clone()),
+            ParameterChoice::DoubleParam(v) => tensor::ParameterValue::Double(*v),
+            ParameterChoice::Uint64Param(v) => tensor::ParameterValue::Uint64(*v),
+        })
+}
+
+/// Convert Dynamo ParameterValue to KServe InferParameter
+fn dynamo_param_to_kserve(param: &tensor::ParameterValue) -> inference::InferParameter {
+
+
+    let parameter_choice = match param {
+        tensor::ParameterValue::Bool(v) => ParameterChoice::BoolParam(*v),
+        tensor::ParameterValue::Int64(v) => ParameterChoice::Int64Param(*v),
+        tensor::ParameterValue::String(v) => ParameterChoice::StringParam(v.clone()),
+        tensor::ParameterValue::Double(v) => ParameterChoice::DoubleParam(*v),
+        tensor::ParameterValue::Uint64(v) => ParameterChoice::Uint64Param(*v),
+    };
+
+    inference::InferParameter {
+        parameter_choice: Some(parameter_choice),
+    }
+}
+
 impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
     type Error = Status;
 
@@ -200,6 +249,18 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
             ));
         }
 
+        // Extract request-level parameters
+        let parameters = if request.parameters.is_empty() {
+            None
+        } else {
+            let mut converted_params = std::collections::HashMap::new();
+            for (k, v) in request.parameters.iter() {
+                let param_value = kserve_param_to_dynamo(k, v)?;
+                converted_params.insert(k.clone(), param_value);
+            }
+            Some(converted_params)
+        };
+
         let mut tensor_request = NvCreateTensorRequest {
             id: if !request.id.is_empty() {
                 Some(request.id.clone())
@@ -208,17 +269,31 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
             },
             model: request.model_name.clone(),
             tensors: Vec::new(),
+            parameters,
             nvext: None,
         };
 
         // iterate through inputs
         for (idx, input) in request.inputs.into_iter().enumerate() {
+            // Extract per-tensor parameters
+            let tensor_parameters = if input.parameters.is_empty() {
+                None
+            } else {
+                let mut converted_params = std::collections::HashMap::new();
+                for (k, v) in input.parameters.iter() {
+                    let param_value = kserve_param_to_dynamo(k, v)?;
+                    converted_params.insert(k.clone(), param_value);
+                }
+                Some(converted_params)
+            };
+
             let mut tensor = Tensor {
                 metadata: TensorMetadata {
                     name: input.name.clone(),
                     data_type: tensor::DataType::from_str(&input.datatype)
                         .map_err(|err| Status::invalid_argument(err.to_string()))?,
                     shape: input.shape.clone(),
+                    parameters: tensor_parameters,
                 },
                 // Placeholder, will be filled below
                 data: tensor::FlattenTensor::Bool(Vec::new()),
@@ -460,21 +535,47 @@ impl TryFrom<NvCreateTensorResponse> for inference::ModelInferResponse {
     type Error = anyhow::Error;
 
     fn try_from(response: NvCreateTensorResponse) -> Result<Self, Self::Error> {
+        // Convert response-level parameters
+        let parameters = response
+            .parameters
+            .as_ref()
+            .map(|params| {
+                params
+                    .iter()
+                    .map(|(k, v)| (k.clone(), dynamo_param_to_kserve(v)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut infer_response = inference::ModelInferResponse {
             model_name: response.model,
             model_version: "1".to_string(),
             id: response.id.unwrap_or_default(),
             outputs: vec![],
-            parameters: ::std::collections::HashMap::<String, inference::InferParameter>::new(),
+            parameters,
             raw_output_contents: vec![],
         };
         for tensor in &response.tensors {
+            // Convert per-tensor parameters
+            let tensor_parameters = tensor
+                .metadata
+                .parameters
+                .as_ref()
+                .map(|params| {
+                    params
+                        .iter()
+                        .map(|(k, v)| (k.clone(), dynamo_param_to_kserve(v)))
+                        .collect()
+                })
+                .unwrap_or_default();
+
             infer_response
                 .outputs
                 .push(inference::model_infer_response::InferOutputTensor {
                     name: tensor.metadata.name.clone(),
                     datatype: tensor.metadata.data_type.to_string(),
                     shape: tensor.metadata.shape.clone(),
+                    parameters: tensor_parameters,
                     contents: match &tensor.data {
                         tensor::FlattenTensor::Bool(data) => Some(inference::InferTensorContents {
                             bool_contents: data.clone(),
