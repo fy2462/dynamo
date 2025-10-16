@@ -3,15 +3,27 @@
 
 import argparse
 import json
-import os
+import logging
 import re
 import shutil
 import sys
 import subprocess
+import time
+import uuid
 from dataclasses import asdict, dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 from kubernetes import client, config
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+formatter = logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S"
+)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
 
 def run_command(cmd: List[str], capture_output: bool = True, exit_on_error: bool = True):  # type: ignore
     try:
@@ -20,11 +32,11 @@ def run_command(cmd: List[str], capture_output: bool = True, exit_on_error: bool
         )
     except subprocess.CalledProcessError as e:  # pragma: no cover - passthrough
         if exit_on_error:
-            print(f"ERROR: Command failed: {' '.join(cmd)}", file=sys.stderr)
+            logger.error(f"Command failed: {' '.join(cmd)}")
             if e.stdout:
-                print(e.stdout, file=sys.stderr)
+                logger.error(e.stdout)
             if e.stderr:
-                print(e.stderr, file=sys.stderr)
+                logger.error(e.stderr)
             sys.exit(e.returncode)
         raise
 
@@ -213,11 +225,176 @@ def print_table(rows: List[NodeGpuInventory], show_mig: bool = False) -> None:
     def _fmt_row(row: List[str]) -> str:
         return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row))
 
-    print(_fmt_row(headers))
-    print(_fmt_row(["-" * w for w in widths]))
+    logger.info(_fmt_row(headers))
+    logger.info(_fmt_row(["-" * w for w in widths]))
     for row in table:
-        print(_fmt_row(row))
+        logger.info(_fmt_row(row))
 
+
+def aggregate_valued_rows(rows: List[NodeGpuInventory]) -> Tuple[Optional[NodeGpuInventory], int]:
+    """Aggregate rows that have meaningful GPU metadata.
+
+    Preference order when multiple distinct values exist:
+    1) Larger GPUs per node (gpu_count)
+    2) Larger VRAM per GPU (gpu_memory_mib)
+    Returns (selected_row_like, distinct_count).
+    """
+    valued: List[NodeGpuInventory] = [
+        r
+        for r in rows
+        if (r.gpu_product is not None or r.gpu_memory_mib is not None)
+    ]
+    if not valued:
+        return None, 0
+
+    # Group by (product, vram_mib)
+    from collections import defaultdict
+
+    groups: Dict[Tuple[Optional[str], Optional[int]], Dict[str, Union[int, List[NodeGpuInventory]]]] = defaultdict(
+        lambda: {"max_gpu": 0, "rows": []}
+    )
+    for r in valued:
+        key = (r.gpu_product, r.gpu_memory_mib)
+        meta = groups[key]
+        meta["rows"].append(r)  # type: ignore[index]
+        # Use known gpu_count if available for ranking
+        if r.gpu_count is not None:
+            meta["max_gpu"] = max(int(meta["max_gpu"]), int(r.gpu_count))  # type: ignore[index]
+
+    def sort_key(item: Tuple[Tuple[Optional[str], Optional[int]], Dict[str, Union[int, List[NodeGpuInventory]]]]):
+        (prod, mem_mib), meta = item
+        max_gpu = int(meta["max_gpu"])  # type: ignore[index]
+        mem_val = mem_mib if mem_mib is not None else -1
+        return (max_gpu, mem_val)
+
+    selected_key, selected_meta = sorted(groups.items(), key=sort_key, reverse=True)[0]
+    sel_prod, sel_mem_mib = selected_key
+    sel_gpu = int(selected_meta["max_gpu"])  # type: ignore[index]
+
+    selected = NodeGpuInventory(
+        node_name="<aggregate>",
+        gpu_count=sel_gpu if sel_gpu > 0 else None,
+        gpu_product=sel_prod,
+        gpu_memory_mib=sel_mem_mib,
+        mig_capable=None,
+        allocatable_gpu=None,
+        mig_resources={},
+    )
+
+    return selected, len(groups)
+
+
+def _get_current_namespace(default: str = "default") -> str:
+    try:
+        with open("/var/run/secrets/kubernetes.io/serviceaccount/namespace", "r") as f:
+            return f.read().strip() or default
+    except Exception:
+        return default
+
+
+def enrich_with_smi(
+    rows: List[NodeGpuInventory], namespace: Optional[str] = None, timeout_seconds: int = 180
+) -> None:
+    """For nodes missing product/memory labels, schedule a short-lived pod on each node
+    that requests 1 GPU and runs nvidia-smi to capture model and memory.
+
+    Requires permissions: create/get/delete pods and get pods/log in the namespace.
+    """
+    ns = namespace or _get_current_namespace()
+    try:
+        config.load_incluster_config()
+    except Exception:
+        pass
+
+    v1 = client.CoreV1Api()
+
+    for inv in rows:
+        if not inv.gpu_count or (inv.gpu_product is not None and inv.gpu_memory_mib is not None):
+            continue
+
+        pod_name = f"gpu-inv-smi-{uuid.uuid4().hex[:6]}"
+        container = client.V1Container(
+            name="smi",
+            image="nvidia/cuda:12.3.2-base-ubuntu22.04",
+            command=["bash", "-lc"],
+            args=[
+                "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits"
+            ],
+            resources=client.V1ResourceRequirements(
+                limits={"nvidia.com/gpu": "1", "cpu": "100m", "memory": "128Mi"},
+                requests={"nvidia.com/gpu": "1", "cpu": "50m", "memory": "64Mi"},
+            ),
+        )
+
+        pod = client.V1Pod(
+            api_version="v1",
+            kind="Pod",
+            metadata=client.V1ObjectMeta(name=pod_name, namespace=ns),
+            spec=client.V1PodSpec(
+                restart_policy="Never",
+                node_name=inv.node_name,
+                containers=[container],
+            ),
+        )
+
+        logs = ""
+        try:
+            v1.create_namespaced_pod(namespace=ns, body=pod)
+            start = time.time()
+            while time.time() - start < timeout_seconds:
+                p = v1.read_namespaced_pod(name=pod_name, namespace=ns)
+                phase = (p.status.phase or "").lower()
+                if phase in ("succeeded", "failed"):
+                    break
+                time.sleep(2)
+            try:
+                logs = v1.read_namespaced_pod_log(name=pod_name, namespace=ns)
+            except Exception:
+                logs = ""
+        finally:
+            try:
+                v1.delete_namespaced_pod(
+                    name=pod_name, namespace=ns, body=client.V1DeleteOptions()
+                )
+            except Exception:
+                pass
+
+        for line in logs.splitlines():
+            parts = [x.strip() for x in line.split(",")]
+            if len(parts) >= 2 and parts[0]:
+                inv.gpu_product = inv.gpu_product or parts[0]
+                mem_match = re.search(r"\d+", parts[1])
+                if mem_match:
+                    inv.gpu_memory_mib = inv.gpu_memory_mib or int(mem_match.group(0))
+                break
+
+
+def get_gpu_summary(
+    prefer_client: bool = True, enrich_smi: bool = True
+) -> Tuple[int, str, int]:
+    """Return an aggregate GPU summary for the cluster.
+
+    Selection policy when multiple values exist: prefer higher GPUs per node,
+    then higher VRAM/GPU. Returns tuple of (gpus_per_node, model, vram_mib).
+    If model/VRAM unavailable anywhere, returns (max_gpus, "", 0).
+    """
+    rows, _ = collect_gpu_inventory(prefer_client=prefer_client)
+    if enrich_smi:
+        enrich_with_smi(rows)
+
+    agg, _distinct = aggregate_valued_rows(rows)
+    if agg is None:
+        # Fallback to max GPUs only
+        max_gpus = 0
+        for r in rows:
+            if r.gpu_count is not None:
+                max_gpus = max(max_gpus, int(r.gpu_count))
+        return max_gpus, "", 0
+
+    gpus_val = int(agg.gpu_count) if agg.gpu_count is not None else 0
+    model_val = agg.gpu_product or ""
+    vram_val = int(agg.gpu_memory_mib) if agg.gpu_memory_mib is not None else 0
+    return gpus_val, model_val, vram_val
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -241,21 +418,50 @@ def main() -> None:
         action="store_true",
         help="In table output, show MIG resource types and counts",
     )
+    parser.add_argument(
+        "--enrich-smi",
+        action="store_true",
+        help="Schedule short-lived pods per node to fetch model/VRAM via nvidia-smi",
+    )
+    parser.add_argument(
+        "--aggregate",
+        action="store_true",
+        help="Print a single representative (GPUs per node, MODEL, VRAM/GPU). Warn if multiple values exist",
+    )
 
     args = parser.parse_args()
 
     prefer_client = args.prefer == "client"
     rows, source = collect_gpu_inventory(prefer_client=prefer_client)
 
+    if args.enrich_smi:
+        enrich_with_smi(rows)
+
     if args.format == "json":
         payload = {
             "source": source,
             "items": [r.to_dict() for r in rows],
         }
-        print(json.dumps(payload, indent=2))
+        logger.info(json.dumps(payload, indent=2))
         return
 
+    # Table output
     print_table(rows, show_mig=args.show_mig)
+
+    if args.aggregate:
+        agg, distinct = aggregate_valued_rows(rows)
+        if agg is None:
+            logger.warning("No nodes expose MODEL/VRAM; cannot aggregate")
+            return
+        if distinct > 1:
+            logger.warning(
+                f"Multiple distinct GPU model/VRAM pairs detected across nodes: {distinct}. Showing highest GPUs per node, then highest VRAM/GPU."
+            )
+        # Print concise aggregate line
+        model = agg.gpu_product or ""
+        vram = _format_gib(agg.gpu_memory_mib)
+        gpus = agg.gpu_count if agg.gpu_count is not None else ""
+        logger.info(f"Aggregate => GPUS: {gpus}  MODEL: {model}  VRAM/GPU: {vram}")
 
 
 if __name__ == "__main__":

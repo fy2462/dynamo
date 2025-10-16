@@ -13,7 +13,7 @@ rules:
   # Pods - needed for listing pods by label selector and getting logs
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["list"]
+    verbs: ["list", "get", "create", "delete"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
