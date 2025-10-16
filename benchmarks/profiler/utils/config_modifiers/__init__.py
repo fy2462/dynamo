@@ -13,15 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Override values for blackbox (non-Dynamo) EPP installation
-# Use this file to disable Dynamo routing and use the standard GAIE EPP image
+from typing import TYPE_CHECKING
 
-extension:
-  image: us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v0.4.0
+if TYPE_CHECKING:
+    from benchmarks.profiler.utils.config import ConfigModifierProtocol
 
-imagePullSecrets: []
+from benchmarks.profiler.utils.config_modifiers.sglang import SGLangConfigModifier
+from benchmarks.profiler.utils.config_modifiers.trtllm import TrtllmConfigModifier
+from benchmarks.profiler.utils.config_modifiers.vllm import VllmV1ConfigModifier
 
-epp:
-  useDynamo: false
-  extraEnv: []
+CONFIG_MODIFIERS: dict[str, type["ConfigModifierProtocol"]] = {
+    "vllm": VllmV1ConfigModifier,
+    "sglang": SGLangConfigModifier,
+    "trtllm": TrtllmConfigModifier,
+}
 
+__all__ = [
+    "VllmV1ConfigModifier",
+    "SGLangConfigModifier",
+    "TrtllmConfigModifier",
+    "CONFIG_MODIFIERS",
+]

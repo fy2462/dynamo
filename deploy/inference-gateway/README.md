@@ -2,8 +2,9 @@
 
 When integrating Dynamo with the Inference Gateway you could either use the default EPP image provided by the extension or use the custom Dynamo image.
 
-1. When using the Dynamo custom EPP image you will take advantage of the Dynamo router when EPP chooses the best worker to route the request to. This setup uses a custom Dynamo plugin `dyn-kv` to pick the best worker. In this case the Dynamo routing logic is moved upstream. We recommend this approach especially if you have more than one Dynamo deployment within an InferencePool.
-2. When using the GAIE-provided image for the EPP, the Dynamo deployment is treated as a black box and the EPP would route round-robin among Dynamo FrontEnds. In this case GAIE just fans out the traffic, and the smarts only remain within the Dynamo graph. Use this if you have one Dynamo graph and do not want to obtain the Dynamo EPP image. This is a "backup" approach.
+1. When using the Dynamo custom EPP image you will take advantage of the Dynamo router when EPP chooses the best worker to route the request to. This setup uses a custom Dynamo plugin `dyn-kv` to pick the best worker. In this case the Dynamo routing logic is moved upstream. We recommend this approach.
+
+2. When using the GAIE-provided image for the EPP, the Dynamo deployment is treated as a black box and the EPP would route round-robin. In this case GAIE just fans out the traffic, and the smarts only remain within the Dynamo graph. Use this if you have one Dynamo graph and do not want to obtain the Dynamo EPP image. This is a "backup" approach.
 
 The setup provided here uses the Dynamo custom EPP by default. Set `epp.useDynamo=false` in your deployment to pick the approach 2.
 
@@ -105,7 +106,7 @@ kubectl create secret docker-registry docker-imagepullsecret \
   --namespace=$NAMESPACE
 ```
 
-Do not forget to include the the HuggingFace token if required.
+Do not forget to include the HuggingFace token if required.
 
 ```bash
 export HF_TOKEN=your_hf_token
@@ -114,7 +115,7 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
-Create a model configuration file similar to the vllm_agg_qwen.yaml for you model.
+Create a model configuration file similar to the vllm_agg_qwen.yaml for your model.
 This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../components/backends/vllm/deploy/agg.yaml)
 Take a note of the model's block size provided in the model card.
 
@@ -134,7 +135,8 @@ export EPP_IMAGE=<the-epp-image-you-built>
 ```
 
 ```bash
-helm install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE
+helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE
+# do not include --set-string extension.image=$EPP_IMAGE to use the default images
 ```
 
 Key configurations include:
@@ -196,7 +198,7 @@ The script will apply a custom patch to the code with your GAIE repo and build t
 ```bash
 # Use your custom paths
 export DYNAMO_DIR=/path/to/dynamo
-export EPP_DIR=/path/to/gateway-api-inference-extension
+export GAIE_DIR=/path/to/gateway-api-inference-extension
 
 # Run the script
 cd deploy/inference-gateway
@@ -218,7 +220,10 @@ You can also use the standard EPP image`us-central1-docker.pkg.dev/k8s-staging-i
 
 ```bash
 cd deploy/inference-gateway
-helm install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml -f ./values-blackbox-epp.yaml
+# Optionally export the standard EPP image if you do not want to use the default we suggest.
+export EPP_IMAGE=us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v0.4.0
+helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set epp.useDynamo=false
+# Optionally overwrite the image --set-string extension.image=$EPP_IMAGE
 ```
 
 ### 5. Verify Installation ###
