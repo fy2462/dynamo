@@ -125,7 +125,6 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
             layer_idx: The index of the layer to save.
             stream: The stream the forward pass is being executed on.
         """
-        # This is a WAR to not collide with registering a forward_pass_callable
         if not self.use_forward_pass_callable:
             self.events[layer_idx].record(stream)
             self._connector.save_kv_layer(layer_idx)
