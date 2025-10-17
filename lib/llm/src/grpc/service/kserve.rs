@@ -195,7 +195,7 @@ impl GrpcInferenceService for KserveService {
 
         // [gluo TODO] refactor to reuse code, inference logic is largely the same
         if self.state().is_tensor_model(&model) {
-            let to_raw_output_contents = !request.raw_input_contents.is_empty();
+            let set_raw_output_contents = !request.raw_input_contents.is_empty();
             let tensor_request: NvCreateTensorRequest = NvCreateTensorRequest::try_from(request)
                 .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
 
@@ -208,7 +208,7 @@ impl GrpcInferenceService for KserveService {
                         tracing::error!("Failed to fold completions stream: {:?}", e);
                         Status::internal(format!("Failed to fold completions stream: {}", e))
                     })?,
-                to_raw_output_contents,
+                set_raw_output_contents,
             };
 
             let mut reply: ModelInferResponse = tensor_response.try_into().map_err(|e| {
@@ -301,7 +301,7 @@ impl GrpcInferenceService for KserveService {
                 if state.is_tensor_model(&model) {
                     // Must keep track of 'request_id' which will be returned in corresponding response
                     let request_id = request.id.clone();
-                    let to_raw_output_contents = !request.raw_input_contents.is_empty();
+                    let set_raw_output_contents = !request.raw_input_contents.is_empty();
                     let tensor_request: NvCreateTensorRequest = request.try_into().map_err(|e| {
                         Status::invalid_argument(format!("Failed to parse request: {}", e))
                     })?;
@@ -313,7 +313,7 @@ impl GrpcInferenceService for KserveService {
                         match response.data {
                             Some(data) => {
                                 let data = ExtendedNvCreateTensorResponse {response: data,
-                                    to_raw_output_contents,
+                                    set_raw_output_contents,
                                 };
                                 let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
                                     Status::invalid_argument(format!("Failed to parse response: {}", e))

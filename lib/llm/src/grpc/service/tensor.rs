@@ -38,7 +38,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 // the conversion to ModelInferResponse / ModelStreamInferResponse
 pub struct ExtendedNvCreateTensorResponse {
     pub response: NvCreateTensorResponse,
-    pub to_raw_output_contents: bool,
+    pub set_raw_output_contents: bool,
 }
 
 /// Tensor Request Handler
@@ -485,7 +485,7 @@ impl TryFrom<ExtendedNvCreateTensorResponse> for inference::ModelInferResponse {
                     shape: tensor.metadata.shape.clone(),
                     ..Default::default()
                 });
-            if extended_response.to_raw_output_contents {
+            if extended_response.set_raw_output_contents {
                 infer_response.add_raw_output_contents(tensor)?;
             } else {
                 infer_response.fill_last_tensor_contents(tensor);
@@ -497,6 +497,14 @@ impl TryFrom<ExtendedNvCreateTensorResponse> for inference::ModelInferResponse {
 }
 
 impl inference::ModelInferResponse {
+    /// Serializes the tensor data into a standardized little-endian byte format
+    /// and appends it to the raw_output_contents field.
+    ///
+    /// This ensures consistent cross-platform representation of numerical values
+    /// regardless of the host machine's native endianness. Each tensor element is
+    /// flattened and converted to its corresponding little-endian byte sequence,
+    /// matching the protocol format expected by Triton Inference Server and
+    /// similar inference runtimes.
     pub fn add_raw_output_contents(
         &mut self,
         tensor: &tensor::Tensor,
