@@ -34,7 +34,7 @@ use std::fmt;
 use crate::{
     config::HealthStatus,
     discovery::Lease,
-    metrics::{MetricsHierarchy, MetricsRegistryOps, prometheus_names},
+    metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},
     service::ServiceSet,
     transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
 };
@@ -229,7 +229,7 @@ impl MetricsHierarchy for Component {
         parents
     }
 
-    fn get_metrics_registry(&self) -> &dyn MetricsRegistryOps {
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
         &self.metrics_registry
     }
 }
@@ -448,7 +448,7 @@ impl MetricsHierarchy for Endpoint {
         parents
     }
 
-    fn get_metrics_registry(&self) -> &dyn MetricsRegistryOps {
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
         &self.metrics_registry
     }
 }

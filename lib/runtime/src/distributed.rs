@@ -9,7 +9,7 @@ use crate::{
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
     metrics::PrometheusUpdateCallback,
-    metrics::{MetricsHierarchy, MetricsRegistryOps},
+    metrics::{MetricsHierarchy, MetricsRegistry},
     service::ServiceClient,
     transports::{etcd, nats, tcp},
 };
@@ -33,7 +33,7 @@ impl MetricsHierarchy for DistributedRuntime {
         vec![] // drt is the root, so no parent hierarchies
     }
 
-    fn get_metrics_registry(&self) -> &dyn MetricsRegistryOps {
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
         &self.metrics_registry
     }
 }

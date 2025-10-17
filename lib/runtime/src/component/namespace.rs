@@ -7,7 +7,7 @@ use futures::stream::StreamExt;
 use futures::{Stream, TryStreamExt};
 
 use super::*;
-use crate::metrics::{MetricsHierarchy, MetricsRegistryOps};
+use crate::metrics::{MetricsHierarchy, MetricsRegistry};
 use crate::traits::events::{EventPublisher, EventSubscriber};
 
 #[async_trait]
@@ -89,7 +89,7 @@ impl MetricsHierarchy for Namespace {
         parents
     }
 
-    fn get_metrics_registry(&self) -> &dyn MetricsRegistryOps {
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
         &self.metrics_registry
     }
 }
