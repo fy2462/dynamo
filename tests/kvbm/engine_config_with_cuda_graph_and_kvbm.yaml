@@ -1,5 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 backend: pytorch
-cuda_graph_config:  
+cuda_graph_config:
   max_batch_size: 8
 kv_cache_config:
   enable_partial_reuse: false
