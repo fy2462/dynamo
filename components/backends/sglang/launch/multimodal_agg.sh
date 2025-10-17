@@ -69,8 +69,7 @@ SGLANG_BACKEND_DIR="$SCRIPT_DIR/src"
 
 
 # run ingress
-export OTEL_SERVICE_NAME=dynamo-frontend
-python3 -m dynamo.frontend --http-port=8000 &
+OTEL_SERVICE_NAME=dynamo-frontend python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
 
 # run SGLang multimodal processor

@@ -36,8 +36,7 @@ if [ "$ENABLE_OTEL" = true ]; then
 fi
 
 # run ingress
-export OTEL_SERVICE_NAME=dynamo-frontend
-python3 -m dynamo.frontend --http-port=8000 &
+OTEL_SERVICE_NAME=dynamo-frontend python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
 
 # run prefill worker
