@@ -122,7 +122,7 @@ pub fn pin_thread_to_numa_node(node: NumaNode) -> Result<(), String> {
         let mut cpu_set: libc::cpu_set_t = mem::zeroed();
 
         for cpu in cpus {
-            libc::CPU_SET(cpu, &mut cpu_set);
+            libc::CPU_SET(*cpu, &mut cpu_set);
         }
 
         let result = libc::sched_setaffinity(

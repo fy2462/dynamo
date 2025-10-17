@@ -76,7 +76,7 @@ impl NumaWorker {
     }
 
     /// Worker thread main loop
-    fn worker_loop(node: NumaNode, request_rx: Receiver<AllocRequest>) {
+    fn worker_loop(node: NumaNode, requests: Receiver<AllocRequest>) {
         // First thing: pin this thread to the target NUMA node
         tracing::trace!("Pinning worker thread to node {}", node.0);
         if let Err(e) = super::pin_thread_to_numa_node(node) {
@@ -136,6 +136,16 @@ impl NumaWorker {
     fn do_cuda_pinned_allocation(size: usize, node: NumaNode, gpu_id: u32) -> AllocResult {
         if size == 0 {
             return Err("Cannot allocate zero bytes".to_string());
+        }
+
+        // Verify we're on the correct NUMA node BEFORE allocation
+        let node_before = get_current_cpu_numa_node();
+        if node_before != node {
+            tracing::warn!(
+                "Worker thread moved! Expected NUMA node {}, currently on node {}",
+                node.0,
+                node_before.0
+            );
         }
 
         // Get or create CUDA context for this GPU
