@@ -46,7 +46,7 @@ usage() {
     echo "  --namespace <ns>   Kubernetes namespace (default: dynamo)"
     echo "  --skip-model-cache Skip model downloading (assumes model cache already exists)"
     echo "  --dry-run          Print commands without executing them"
-    echo "  --gaie[=true|false] Enable GAIE integration subfolder (runs its deploy.sh and skips benchmark) (default: ${GAIE})"
+    echo "  --gaie[=true|false] Enable GAIE integration subfolder (applies GAIE manifests skips benchmark) (default: ${GAIE})"
     echo "  -h, --help         Show this help message"
     echo ""
     echo "Environment Variables:"
