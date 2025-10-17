@@ -73,6 +73,21 @@ def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
     return config.__dict__
 
 
+def slugify(s: str) -> str:
+    """
+    Convert string to a slug (URL/NATS friendly).
+    Only allows a-z, 0-9, - and _. Replaces other characters with _.
+    Matches the Rust validation requirements.
+    """
+    result = s.lower()
+    result = "".join(
+        c if (c.isascii() and (c.isalnum() or c in ("-", "_"))) else "_" for c in result
+    )
+    # Remove leading underscores
+    result = result.lstrip("_")
+    return result
+
+
 def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
     """Parse endpoint string into namespace, component, endpoint parts."""
     endpoint_str = endpoint.replace("dyn://", "", 1)
@@ -183,7 +198,9 @@ def parse_args() -> Config:
         # This ensures different models register as different services
         config.namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
         config.component = "prefill" if args.is_prefill_worker else "backend"
-        config.endpoint = f"generate_{args.served_model_name if args.served_model_name else args.model}"
+        model_name = args.served_model_name if args.served_model_name else args.model
+        # Slugify to match Rust validation requirements (only a-z, 0-9, -, _)
+        config.endpoint = f"generate_{slugify(model_name)}"
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
     config.migration_limit = args.migration_limit
