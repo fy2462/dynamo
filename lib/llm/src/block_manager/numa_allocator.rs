@@ -163,9 +163,9 @@ mod tests {
 
     #[test]
     fn test_numa_node_display() {
-        assert_eq!(format!("{}", NumaNode(0)), "0");
-        assert_eq!(format!("{}", NumaNode(7)), "7");
-        assert_eq!(format!("{}", NumaNode::UNKNOWN), "unknown");
+        assert_eq!(format!("{}", NumaNode(0)), "NumaNode(0)");
+        assert_eq!(format!("{}", NumaNode(7)), "NumaNode(7)");
+        assert_eq!(format!("{}", NumaNode::UNKNOWN), "UNKNOWN");
     }
 
     #[test]
