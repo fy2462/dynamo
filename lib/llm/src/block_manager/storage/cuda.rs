@@ -199,7 +199,6 @@ impl PinnedStorage {
                     .map_err(StorageError::Cuda)? as *mut u8
             };
 
-            let ptr = ptr as *mut u8;
             assert!(!ptr.is_null(), "Failed to allocate pinned memory");
             assert!(ptr.is_aligned(), "Pinned memory is not aligned");
             assert!(size < isize::MAX as usize);

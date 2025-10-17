@@ -71,7 +71,7 @@ pub fn get_device_numa_node(device_id: u32) -> NumaNode {
     // Use nvidia-smi topo to get NUMA ID of nearest CPU
     // This directly returns the NUMA node
     let output = match Command::new("nvidia-smi")
-        .args(&[
+        .args([
             "topo",
             "--get-numa-id-of-nearby-cpu",
             "-i",
@@ -86,16 +86,13 @@ pub fn get_device_numa_node(device_id: u32) -> NumaNode {
         }
     };
 
-    if let Ok(stdout) = std::str::from_utf8(&output.stdout) {
-        // Parse output: "NUMA IDs of closest CPU: 0"
-        if let Some(line) = stdout.lines().next() {
-            if let Some(numa_str) = line.split(':').nth(1) {
-                if let Ok(node) = numa_str.trim().parse::<u32>() {
-                    tracing::info!("GPU {} on NUMA node {}", device_id, node);
-                    return NumaNode(node);
-                }
-            }
-        }
+    if let Ok(stdout) = std::str::from_utf8(&output.stdout)
+        && let Some(line) = stdout.lines().next()
+        && let Some(numa_str) = line.split(':').nth(1)
+        && let Ok(node) = numa_str.trim().parse::<u32>()
+    {
+        tracing::info!("GPU {} on NUMA node {}", device_id, node);
+        return NumaNode(node);
     }
     tracing::warn!("Failed to get NUMA node for GPU {}", device_id);
     NumaNode::UNKNOWN
@@ -220,7 +217,7 @@ mod tests {
         // Verify NumaNode is Copy and Clone
         let node1 = NumaNode(5);
         let node2 = node1; // Copy
-        let node3 = node1.clone(); // Clone
+        let node3 = node1; // Clone
 
         assert_eq!(node1, node2);
         assert_eq!(node1, node3);

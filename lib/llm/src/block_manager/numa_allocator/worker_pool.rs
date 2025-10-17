@@ -232,7 +232,7 @@ impl NumaWorker {
         // Large allocations take time: we account for ~1 second per GB to touch pages
         // Add 10 second base + 1 second per GB
         let timeout_secs = 10u64 + (size as u64 / (1024 * 1024 * 1024));
-        let timeout = Duration::from_secs(timeout_secs.max(10).min(300)); // Clamp to 10-300 seconds
+        let timeout = Duration::from_secs(timeout_secs.clamp(10, 300)); // Clamp to 10-300 seconds
 
         tracing::trace!(
             "Worker pool waiting for allocation of {} MB with timeout of {} seconds",

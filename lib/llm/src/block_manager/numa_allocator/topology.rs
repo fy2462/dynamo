@@ -56,7 +56,7 @@ impl NumaTopology {
             let cpulist = fs::read_to_string(&cpulist_path)
                 .map_err(|e| format!("Failed to read {}: {}", cpulist_path.display(), e))?;
 
-            let cpus = parse_cpulist(&cpulist.trim())?;
+            let cpus = parse_cpulist(cpulist.trim())?;
 
             // Populate both maps
             for cpu in &cpus {
@@ -147,7 +147,7 @@ fn parse_cpulist(cpulist: &str) -> Result<Vec<usize>, String> {
 /// Callers should handle errors gracefully by disabling NUMA optimizations.
 pub fn get_numa_topology() -> Result<&'static NumaTopology, &'static str> {
     TOPOLOGY
-        .get_or_init(|| NumaTopology::from_sysfs())
+        .get_or_init(NumaTopology::from_sysfs)
         .as_ref()
         .map_err(|e| {
             tracing::warn!("NUMA topology unavailable: {}", e);
