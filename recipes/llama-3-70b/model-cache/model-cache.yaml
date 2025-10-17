@@ -6,8 +6,8 @@ metadata:
   name: model-cache
 spec:
   accessModes:
-    - ReadWriteOnce # ReadWriteOnce for local-path; ReadWriteMany otherwise
+    - ReadWriteMany
   resources:
     requests:
-      storage: 120Gi
-  storageClassName: local-path
+      storage: 100Gi
+  storageClassName: "your-storage-class-name"
