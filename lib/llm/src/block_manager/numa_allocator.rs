@@ -91,7 +91,7 @@ pub fn get_device_numa_node(device_id: u32) -> NumaNode {
         && let Some(numa_str) = line.split(':').nth(1)
         && let Ok(node) = numa_str.trim().parse::<u32>()
     {
-        tracing::info!("GPU {} on NUMA node {}", device_id, node);
+        tracing::trace!("GPU {} on NUMA node {}", device_id, node);
         return NumaNode(node);
     }
     tracing::warn!("Failed to get NUMA node for GPU {}", device_id);
@@ -129,8 +129,8 @@ pub fn pin_thread_to_numa_node(node: NumaNode) -> Result<(), String> {
         );
 
         if result != 0 {
-            let err = *libc::__errno_location();
-            return Err(format!("Failed to set CPU affinity: errno {}", err));
+            let err = std::io::Error::last_os_error();
+            return Err(format!("Failed to set CPU affinity: {}", err));
         }
     }
 

@@ -16,6 +16,7 @@ use super::get_current_cpu_numa_node;
 use crate::block_manager::storage::cuda::Cuda;
 use cudarc::driver::result::malloc_host;
 use cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED;
+use nix::libc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -118,7 +119,26 @@ impl NumaWorker {
                         node.0
                     );
                     let result = Self::do_cuda_pinned_allocation(req.size, req.node, req.gpu_id);
-                    let _ = req.response.send(result);
+                    match result {
+                        Ok(SendPtr(ptr)) => {
+                            if let Err(_e) = req.response.send(Ok(SendPtr(ptr))) {
+                                // Receiver gone: free to avoid leak
+                                tracing::warn!(
+                                    "Receiver dropped before receiving allocation, freeing {} bytes at {:p}",
+                                    req.size,
+                                    ptr
+                                );
+                                unsafe {
+                                    let _ = cudarc::driver::result::free_host(
+                                        ptr as *mut std::ffi::c_void,
+                                    );
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let _ = req.response.send(Err(err));
+                        }
+                    }
                 }
                 Err(_) => {
                     // Channel closed, exit worker
@@ -155,7 +175,8 @@ impl NumaWorker {
         unsafe {
             // Bind CUDA context to this worker thread before allocation
             // This ensures malloc_host has a valid context to work with
-            let _guard = ctx.bind_to_thread();
+            ctx.bind_to_thread()
+                .map_err(|e| format!("Failed to bind CUDA context to worker thread: {:?}", e))?;
 
             // Verify thread is still on correct node after CUDA context binding
             let node_after_ctx = get_current_cpu_numa_node();
@@ -189,8 +210,22 @@ impl NumaWorker {
                 );
             }
 
-            // Touch all pages to trigger first-touch policy
-            std::ptr::write_bytes(ptr, 0, size);
+            // Touch one byte per page to trigger first-touch policy efficiently
+            // This is much faster than zeroing the entire region for large allocations
+            let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }.max(4096);
+            let mut offset = 0usize;
+            while offset < size {
+                unsafe {
+                    std::ptr::write_volatile(ptr.add(offset), 0);
+                }
+                offset = offset.saturating_add(page_size);
+            }
+            // Ensure the last page is touched
+            if size > 0 && size % page_size != 0 {
+                unsafe {
+                    std::ptr::write_volatile(ptr.add(size - 1), 0);
+                }
+            }
 
             // Verify final node after touching
             let node_after_touch = get_current_cpu_numa_node();
