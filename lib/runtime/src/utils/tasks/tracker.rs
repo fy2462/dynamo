@@ -357,14 +357,14 @@
 //!
 //! ```rust
 //! use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
-//! use dynamo_runtime::metrics::MetricsRegistry;
+//! use dynamo_runtime::DistributedRuntime;
 //!
-//! # async fn example(registry: &dyn MetricsRegistry) -> anyhow::Result<()> {
+//! # async fn example(drt: &DistributedRuntime) -> anyhow::Result<()> {
 //! // Root tracker with Prometheus metrics
 //! let tracker = TaskTracker::new_with_prometheus(
 //!     SemaphoreScheduler::with_permits(10),
 //!     LogOnlyPolicy::new(),
-//!     registry,
+//!     drt,
 //!     "my_component"
 //! )?;
 //!
@@ -1548,9 +1548,9 @@ impl PrometheusTaskMetrics {
     /// ```rust
     /// # use std::sync::Arc;
     /// # use dynamo_runtime::utils::tasks::tracker::PrometheusTaskMetrics;
-    /// # use dynamo_runtime::metrics::MetricsRegistry;
-    /// # fn example(registry: Arc<dyn MetricsRegistry>) -> anyhow::Result<()> {
-    /// let metrics = PrometheusTaskMetrics::new(registry.as_ref(), "main_tracker")?;
+    /// # use dynamo_runtime::DistributedRuntime;
+    /// # fn example(drt: &DistributedRuntime) -> anyhow::Result<()> {
+    /// let metrics = PrometheusTaskMetrics::new(drt, "main_tracker")?;
     /// # Ok(())
     /// # }
     /// ```
@@ -2049,14 +2049,14 @@ impl TaskTracker {
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
     /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
-    /// # use dynamo_runtime::metrics::MetricsRegistry;
-    /// # fn example(registry: Arc<dyn MetricsRegistry>) -> anyhow::Result<()> {
+    /// # use dynamo_runtime::DistributedRuntime;
+    /// # fn example(drt: &DistributedRuntime) -> anyhow::Result<()> {
     /// let scheduler = SemaphoreScheduler::with_permits(10);
     /// let error_policy = LogOnlyPolicy::new();
     /// let tracker = TaskTracker::new_with_prometheus(
     ///     scheduler,
     ///     error_policy,
-    ///     registry.as_ref(),
+    ///     drt,
     ///     "main_tracker"
     /// )?;
     /// # Ok(())
