@@ -150,6 +150,7 @@ def send_completion_request(
 # Test markers to align with repository conventions
 # Todo: enable the rest when kvbm is built in the ci
 @pytest.mark.kvbm
+@pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.gpu_1
@@ -184,6 +185,7 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
 
 
 @pytest.mark.kvbm
+@pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.gpu_1
