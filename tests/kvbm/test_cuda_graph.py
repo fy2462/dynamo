@@ -13,28 +13,16 @@ before validation) to avoid server initialization effects that could
 impact determinism measurements.
 """
 
-import importlib.util
 import logging
 import os
 import shutil
-import signal
-import subprocess
-import time
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-from enum import Enum
-from pathlib import Path
-from typing import Any, Dict, List, Optional, TextIO, Tuple
 
 import pytest
 import requests
 
-
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.engine_process import FRONTEND_PORT
-from tests.utils.managed_process import ManagedProcess, DynamoFrontendProcess
-from tests.utils.payloads import check_models_api, completions_response_handler
+from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
+from tests.utils.payloads import check_models_api
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +32,13 @@ SERVED_MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 PROMPT = "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
 
+
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with TRTLLM backend"""
 
     def __init__(self, request, worker_id: str, engine_config: str):
         self.worker_id = worker_id
-        
+
         command = [
             "python3",
             "-m",
@@ -119,6 +108,7 @@ class DynamoWorkerProcess(ManagedProcess):
             )
         return False
 
+
 def send_completion_request(
     prompt: str, max_tokens: int, timeout: int = 120
 ) -> requests.Response:
@@ -165,27 +155,33 @@ def send_completion_request(
 @pytest.mark.gpu_1
 def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
     """
-    End-to-end test for TRTLLM worker with cuda_graph_config not defined and 
+    End-to-end test for TRTLLM worker with cuda_graph_config not defined and
     KVBM enabled.
 
-    This test verifies a TRTLLM worker is able to serve requests when 
-    cuda graphs are not enabled in pytorch. KVBM should be able to offload 
+    This test verifies a TRTLLM worker is able to serve requests when
+    cuda graphs are not enabled in pytorch. KVBM should be able to offload
     blocks regardless.
     """
-
 
     logger.info("Starting frontend...")
     with DynamoFrontendProcess(request):
         logger.info("Frontend started.")
 
-        engine_config_with_cuda_graph_and_kvbm = "tests/kvbm/engine_config_without_cuda_graph_and_kvbm.yaml"
+        engine_config_with_cuda_graph_and_kvbm = (
+            "tests/kvbm/engine_config_without_cuda_graph_and_kvbm.yaml"
+        )
         logger.info("Starting worker...")
-        with DynamoWorkerProcess(request, "decode", engine_config_with_cuda_graph_and_kvbm) as worker:
+        with DynamoWorkerProcess(
+            request, "decode", engine_config_with_cuda_graph_and_kvbm
+        ) as worker:
             logger.info(f"Worker PID: {worker.get_pid()}")
 
             response = send_completion_request(PROMPT, 100, timeout=10)
-            assert response.status_code.ok(), f"Expected successful status, got {response.status_code}"
+            assert (
+                response.status_code.ok()
+            ), f"Expected successful status, got {response.status_code}"
             logger.info(f"Completion request succeeded: {response.status_code}")
+
 
 @pytest.mark.kvbm
 @pytest.mark.e2e
@@ -193,25 +189,29 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
 @pytest.mark.gpu_1
 def test_kvbm_with_cuda_graph_enabled(request, runtime_services):
     """
-    End-to-end test for TRTLLM worker with cuda_graph_config defined and 
+    End-to-end test for TRTLLM worker with cuda_graph_config defined and
     KVBM enabled.
 
-    This test verifies a TRTLLM worker is able to serve requests when 
-    cuda graphs are enabled in pytorch. KVBM should be able to offload 
+    This test verifies a TRTLLM worker is able to serve requests when
+    cuda graphs are enabled in pytorch. KVBM should be able to offload
     blocks regardless.
     """
-
 
     logger.info("Starting frontend...")
     with DynamoFrontendProcess(request):
         logger.info("Frontend started.")
 
-        engine_config_with_cuda_graph_and_kvbm = "tests/kvbm/engine_config_with_cuda_graph_and_kvbm.yaml"
+        engine_config_with_cuda_graph_and_kvbm = (
+            "tests/kvbm/engine_config_with_cuda_graph_and_kvbm.yaml"
+        )
         logger.info("Starting worker...")
-        with DynamoWorkerProcess(request, "decode", engine_config_with_cuda_graph_and_kvbm) as worker:
+        with DynamoWorkerProcess(
+            request, "decode", engine_config_with_cuda_graph_and_kvbm
+        ) as worker:
             logger.info(f"Worker PID: {worker.get_pid()}")
 
             response = send_completion_request(PROMPT, 100, timeout=10)
-            assert response.status_code.ok(), f"Expected successful status, got {response.status_code}"
+            assert (
+                response.status_code.ok()
+            ), f"Expected successful status, got {response.status_code}"
             logger.info(f"Completion request succeeded: {response.status_code}")
-

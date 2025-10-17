@@ -567,9 +567,10 @@ class ManagedProcess:
         except psutil.NoSuchProcess:
             return []
 
+
 class DynamoFrontendProcess(ManagedProcess):
     """Process manager for Dynamo frontend"""
-    
+
     _logger = logging.getLogger()
 
     def __init__(self, request):

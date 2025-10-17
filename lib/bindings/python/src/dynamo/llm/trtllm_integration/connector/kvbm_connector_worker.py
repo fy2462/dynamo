@@ -11,11 +11,16 @@ from dynamo.llm.trtllm_integration.rust import (
 )
 from dynamo.runtime import DistributedRuntime
 
-class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
 
+class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
     def _callable_object(self) -> callable:
-        assert self._connector is not None, "Expected cache connector worker to have non-None _connector obj"
-        assert self.event is not None, "Expected cache connector worker to have non-None event obj"
+        assert (
+            self._connector is not None
+        ), "Expected cache connector worker to have non-None _connector obj"
+        assert (
+            self.event is not None
+        ), "Expected cache connector worker to have non-None event obj"
+
         def callback():
             self.event.record()
             self.event.synchronize()
@@ -44,7 +49,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         """
         self.use_forward_pass_callable = True
         return self._callable_object()
-    
+
     def register_kv_caches(self, kv_cache_tensor: torch.Tensor):
         """
         Register the KV cache tensors to the worker.
