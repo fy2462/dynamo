@@ -19,6 +19,10 @@ use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::logging::make_request_span;
+use dynamo_runtime::metrics::prometheus_names::name_prefix;
+use dynamo_runtime::storage::key_value_store::EtcdStore;
+use dynamo_runtime::storage::key_value_store::KeyValueStore;
+use dynamo_runtime::storage::key_value_store::MemoryStore;
 use dynamo_runtime::transports::etcd;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
@@ -26,11 +30,11 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 /// HTTP service shared state
-#[derive(Default)]
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
     etcd_client: Option<etcd::Client>,
+    store: Arc<dyn KeyValueStore>,
     flags: StateFlags,
 }
 
@@ -76,6 +80,7 @@ impl State {
             manager,
             metrics: Arc::new(Metrics::default()),
             etcd_client: None,
+            store: Arc::new(MemoryStore::new()),
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -85,11 +90,12 @@ impl State {
         }
     }
 
-    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: Option<etcd::Client>) -> Self {
+    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: etcd::Client) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            etcd_client,
+            store: Arc::new(EtcdStore::new(etcd_client.clone())),
+            etcd_client: Some(etcd_client),
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -115,6 +121,10 @@ impl State {
         self.etcd_client.as_ref()
     }
 
+    pub fn store(&self) -> Arc<dyn KeyValueStore> {
+        self.store.clone()
+    }
+
     // TODO
     pub fn sse_keep_alive(&self) -> Option<Duration> {
         None
@@ -134,8 +144,11 @@ pub struct HttpService {
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
 
-    // Metrics polling configuration
-    etcd_client: Option<dynamo_runtime::transports::etcd::Client>,
+    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
+    pub(crate) custom_backend_namespace_component_endpoint: Option<String>,
+    pub(crate) custom_backend_metrics_polling_interval: Option<f64>,
+    pub(crate) custom_backend_registry:
+        Option<Arc<super::custom_backend_metrics::CustomBackendMetricsRegistry>>,
 }
 
 #[derive(Clone, Builder)]
@@ -175,6 +188,13 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     etcd_client: Option<etcd::Client>,
+
+    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
+    #[builder(default = "None")]
+    custom_backend_namespace_component_endpoint: Option<String>,
+
+    #[builder(default = "None")]
+    custom_backend_metrics_polling_interval: Option<f64>,
 }
 
 impl HttpService {
@@ -203,22 +223,6 @@ impl HttpService {
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
-
-        // Start background task to poll runtime config metrics with proper cancellation
-        let poll_interval_secs = std::env::var("DYN_HTTP_SVC_CONFIG_METRICS_POLL_INTERVAL_SECS")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .filter(|&secs| secs > 0.0) // Guard against zero or negative values
-            .unwrap_or(8.0);
-        let poll_interval = Duration::from_secs_f64(poll_interval_secs);
-
-        let _polling_task = super::metrics::Metrics::start_runtime_config_polling_task(
-            self.state.metrics_clone(),
-            self.state.manager_clone(),
-            self.etcd_client.clone(),
-            poll_interval,
-            cancel_token.child_token(),
-        );
 
         let router = self.router.clone();
         let observer = cancel_token.child_token();
@@ -263,9 +267,27 @@ impl HttpService {
                 }
             }
         } else {
-            let listener = tokio::net::TcpListener::bind(addr)
-                .await
-                .unwrap_or_else(|_| panic!("could not bind to address: {address}"));
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                tracing::error!(
+                    protocol = %protocol,
+                    address = %address,
+                    error = %e,
+                    "Failed to bind server to address"
+                );
+                match e.kind() {
+                    std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+                        "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
+                        protocol,
+                        self.port
+                    ),
+                    _ => anyhow::anyhow!(
+                        "Failed to start {} server on {}: {}",
+                        protocol,
+                        address,
+                        e
+                    ),
+                }
+            })?;
 
             axum::serve(listener, router)
                 .with_graceful_shutdown(observer.cancelled_owned())
@@ -313,9 +335,10 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let etcd_client = config.etcd_client.clone();
-        let state = Arc::new(State::new_with_etcd(model_manager, config.etcd_client));
-
+        let state = match config.etcd_client {
+            Some(etcd_client) => Arc::new(State::new_with_etcd(model_manager, etcd_client)),
+            None => Arc::new(State::new(model_manager)),
+        };
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -333,7 +356,21 @@ impl HttpServiceConfigBuilder {
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
 
-        // Note: Metrics polling task will be started in run() method to have access to cancellation token
+        // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
+        // Setup custom backend metrics if configured
+        let custom_backend_registry =
+            if config.custom_backend_namespace_component_endpoint.is_some()
+                && config.custom_backend_metrics_polling_interval.is_some()
+            {
+                Some(Arc::new(
+                    super::custom_backend_metrics::CustomBackendMetricsRegistry::new(
+                        name_prefix::COMPONENT.to_string(),
+                        registry.clone(),
+                    ),
+                ))
+            } else {
+                None
+            };
 
         let mut router = axum::Router::new();
 
@@ -354,6 +391,13 @@ impl HttpServiceConfigBuilder {
             all_docs.extend(route_docs);
         }
 
+        // Add OpenAPI documentation routes (must be after all other routes so it can document them)
+        // Note: The path parameter is currently unused as SwaggerUi requires static paths
+        let (openapi_docs, openapi_route) =
+            super::openapi_docs::openapi_router(all_docs.clone(), None);
+        router = router.merge(openapi_route);
+        all_docs.extend(openapi_docs);
+
         // Add span for tracing
         router = router.layer(TraceLayer::new_for_http().make_span_with(make_request_span));
 
@@ -366,7 +410,10 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
-            etcd_client,
+            custom_backend_namespace_component_endpoint: config
+                .custom_backend_namespace_component_endpoint,
+            custom_backend_metrics_polling_interval: config.custom_backend_metrics_polling_interval,
+            custom_backend_registry,
         })
     }
 
@@ -377,6 +424,17 @@ impl HttpServiceConfigBuilder {
 
     pub fn with_etcd_client(mut self, etcd_client: Option<etcd::Client>) -> Self {
         self.etcd_client = Some(etcd_client);
+        self
+    }
+
+    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
+    pub fn with_custom_backend_config(
+        mut self,
+        namespace_component_endpoint: Option<String>,
+        polling_interval: Option<f64>,
+    ) -> Self {
+        self.custom_backend_namespace_component_endpoint = Some(namespace_component_endpoint);
+        self.custom_backend_metrics_polling_interval = Some(polling_interval);
         self
     }
 

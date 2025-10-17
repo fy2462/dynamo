@@ -6,6 +6,9 @@ kind: DynamoGraphDeployment
 metadata:
   name: sgl-dsr1-8gpu
 spec:
+  pvcs:
+    - name: model-cache
+      create: false
   services:
     Frontend:
       dynamoNamespace: sgl-dsr1-8gpu
@@ -28,10 +31,9 @@ spec:
       resources:
         limits:
           gpu: "8"
-      pvc:
-        create: false
-        name: model-cache
-        mountPoint: /root/.cache/huggingface
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /root/.cache/huggingface
       sharedMemory:
         size: 80Gi
       extraPodSpec:
@@ -62,6 +64,7 @@ spec:
               --disaggregation-mode decode
               --disaggregation-transfer-backend nixl
               --disaggregation-bootstrap-port 30001
+              --host 0.0.0.0
     prefill:
       dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
@@ -69,10 +72,9 @@ spec:
       resources:
         limits:
           gpu: "8"
-      pvc:
-        create: false
-        name: model-cache
-        mountPoint: /root/.cache/huggingface
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /root/.cache/huggingface
       sharedMemory:
         size: 80Gi
       extraPodSpec:
@@ -101,3 +103,4 @@ spec:
               --disaggregation-mode prefill
               --disaggregation-transfer-backend nixl
               --disaggregation-bootstrap-port 30001
+              --host 0.0.0.0

@@ -115,7 +115,7 @@ NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-NIXL_REF=0.4.1
+NIXL_REF=0.6.0
 NIXL_UCX_REF=v1.19.0
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
@@ -327,6 +327,15 @@ get_options() {
         --sccache-region)
             if [ "$2" ]; then
                 SCCACHE_REGION=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+
+        --vllm-max-jobs)
+            if [ "$2" ]; then
+                MAX_JOBS=$2
                 shift
             else
                 missing_requirement "$1"
@@ -582,6 +591,13 @@ if [[ $TARGET == "local-dev" ]]; then
     TARGET_STR="--target dev"
 fi
 
+# DEPRECATION: The following build args are not currently used by any Dockerfile and will be removed soon:
+#   - FRAMEWORK
+#   - VLLM_FRAMEWORK (or TRTLLM_FRAMEWORK, SGLANG_FRAMEWORK, etc.)
+#   - VERSION
+#   - PYTHON_PACKAGE_VERSION
+#   - HF_TOKEN
+
 # BUILD DEV IMAGE
 
 BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG --build-arg FRAMEWORK=$FRAMEWORK --build-arg ${FRAMEWORK}_FRAMEWORK=1 --build-arg VERSION=$VERSION --build-arg PYTHON_PACKAGE_VERSION=$PYTHON_PACKAGE_VERSION"
@@ -635,6 +651,7 @@ check_wheel_file() {
 }
 
 if [[ $FRAMEWORK == "TRTLLM" ]]; then
+    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${TRTLLM_COMMIT}"
     if [ "$USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT" = true ]; then
         if [ -n "$TRTLLM_COMMIT" ] || [ -n "$TENSORRTLLM_PIP_WHEEL" ]; then
             echo "ERROR: When using --use-default-experimental-trtllm-commit, do not set --tensorrtllm-commit or --tensorrtllm-pip-wheel."
@@ -707,6 +724,10 @@ if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
 fi
 
+if [ -n "${MAX_JOBS}" ]; then
+    BUILD_ARGS+=" --build-arg MAX_JOBS=${MAX_JOBS} "
+fi
+
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
@@ -738,11 +759,27 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         echo "======================================"
         echo "Starting Build 1: Base Image"
         echo "======================================"
+        # Build 1 (container/Dockerfile) does NOT use (will be removed soon):
+        #   - FRAMEWORK
+        #   - VLLM_FRAMEWORK (or TRTLLM_FRAMEWORK, SGLANG_FRAMEWORK, etc.)
+        #   - VERSION
+        #   - PYTHON_PACKAGE_VERSION
+        #   - HF_TOKEN
+        #   - MAX_JOBS
         $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
         # Start framework build
         echo "======================================"
         echo "Starting Build 2: Framework Image"
         echo "======================================"
+        # Build 2 (container/Dockerfile.vllm or .trtllm, .sglang) does NOT use (will be removed soon):
+        #   - FRAMEWORK
+        #   - VLLM_FRAMEWORK (or TRTLLM_FRAMEWORK, SGLANG_FRAMEWORK, etc.)
+        #   - VERSION
+        #   - PYTHON_PACKAGE_VERSION
+        #   - HF_TOKEN
+        #   - NIXL_REF
+        #   - NIXL_UCX_REF
+        #   - ENABLE_KVBM
         BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
         $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     else

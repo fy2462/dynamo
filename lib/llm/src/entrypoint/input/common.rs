@@ -5,12 +5,12 @@ use std::pin::Pin;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{MODEL_ROOT_PATH, ModelManager, ModelWatcher},
+    discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{self, EngineConfig},
     kv_router::{KvPushRouter, KvRouter},
     migration::Migration,
-    model_card::ModelDeploymentCard,
+    model_card::{self, ModelDeploymentCard},
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
@@ -73,7 +73,9 @@ pub async fn prepare_engine(
                 None,
                 None,
             ));
-            let models_watcher = etcd_client.kv_get_and_watch_prefix(MODEL_ROOT_PATH).await?;
+            let models_watcher = etcd_client
+                .kv_get_and_watch_prefix(model_card::ROOT_PATH)
+                .await?;
             let (_prefix, _watcher, receiver) = models_watcher.dissolve();
 
             let inner_watch_obj = watch_obj.clone();
@@ -279,11 +281,21 @@ where
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
     let migration = Migration::from_mdc(card).into_operator();
+
+    // Create worker monitor only if busy_threshold is set
+    let worker_monitor = busy_threshold.map(|threshold| {
+        Arc::new(crate::discovery::KvWorkerMonitor::new(
+            Arc::new(client.clone()),
+            threshold,
+        )) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>
+    });
+
     let router =
         PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
             client.clone(),
             router_mode,
             busy_threshold,
+            worker_monitor,
         )
         .await?;
     let service_backend = match router_mode {

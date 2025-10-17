@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{any::Any, sync::Arc};
+use std::{any::Any, cmp::max, sync::Arc};
 
 use dynamo_llm::{
     block_manager::{
@@ -115,6 +115,7 @@ pub trait Slot: std::fmt::Debug {
         tokens: &[u32],
         block_ids: &[usize],
         computed_position: usize,
+        is_new_request: bool,
     ) -> Result<(), SlotError>;
 
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError>;
@@ -478,7 +479,7 @@ impl Slot for VllmConnectorSlot {
         &mut self,
         tokens: &[u32],
         block_ids: &[BlockId],
-        _num_computed_tokens: usize,
+        num_computed_tokens: usize,
         num_scheduled_tokens: usize,
     ) -> Result<(), SlotError> {
         if !tokens.is_empty() {
@@ -491,6 +492,11 @@ impl Slot for VllmConnectorSlot {
         } else {
             self.state = SlotState::Prefilling;
         }
+
+        // Use max to advance both current_position and evaluated_blocks at least by num_computed_tokens.
+        // This logic is to prevent redundant block offloading.
+        self.current_position = max(self.current_position, num_computed_tokens);
+        self.evaluated_blocks = max(self.evaluated_blocks, num_computed_tokens / self.block_size);
 
         // apply new block_ids
         if !block_ids.is_empty() {
@@ -592,6 +598,7 @@ impl Slot for VllmConnectorSlot {
         tokens: &[u32],
         block_ids: &[usize],
         computed_position: usize,
+        is_new_request: bool,
     ) -> Result<(), SlotError> {
         // TRTLLM's KV Connector Manager will have (computed_position - external matches)
         // in onborading case
@@ -630,10 +637,21 @@ impl Slot for VllmConnectorSlot {
             self.device_blocks.extend(block_ids);
         }
 
-        let num_candidate_blocks =
-            ((computed_position + 1) / self.block_size) - self.evaluated_blocks;
+        // This approach is fragile, but it’s the only way currently to skip evaluating
+        // the device matched blocks and to avoid offloading them again.
+        // TODO: Consider adding an indicator in the scheduler output to distinguish between
+        // matched and unmatched device blocks/tokens from the scheduler.
+        let maybe_have_device_matched_blocks =
+            is_new_request && computed_position > 0 && self.evaluated_blocks == 0;
 
-        if num_candidate_blocks != 0 {
+        if maybe_have_device_matched_blocks {
+            self.evaluated_blocks = (computed_position + 1) / self.block_size;
+        }
+
+        let num_candidate_blocks =
+            ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
+
+        if num_candidate_blocks > 0 {
             // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
             // for now, offload all the blocks to the host
             let offload_block_ids: Vec<usize> = self
@@ -1264,11 +1282,6 @@ async fn process_offload_request(
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    kvbm_metrics.offload_requests.inc();
-    kvbm_metrics
-        .offload_blocks_d2h
-        .inc_by(offload_req.block_ids.len() as u64);
-
     let request_id = &offload_req.request_id;
     let operation_id = &offload_req.operation_id;
 
@@ -1355,6 +1368,10 @@ async fn process_offload_request(
         "offload - stage 4 complete"
     );
 
+    kvbm_metrics
+        .offload_blocks_d2h
+        .inc_by(blocks_to_register.len() as u64);
+
     // 5. Register the mutable blocks
     let immutable_blocks = block_manager
         .host()
@@ -1376,7 +1393,6 @@ async fn process_onboard_request(
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    kvbm_metrics.onboard_requests.inc();
     if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Host {
         kvbm_metrics
             .onboard_blocks_h2d

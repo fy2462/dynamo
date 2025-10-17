@@ -19,6 +19,11 @@ limitations under the License.
 
 High-level guide to Dynamo Kubernetes deployments. Start here, then dive into specific guides.
 
+## Pre-deployment Checks
+
+Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](/deploy/cloud/pre-deployment/README.md) for more details.
+
+
 ## 1. Install Platform First
 
 ```bash
@@ -53,6 +58,12 @@ Each backend has deployment examples and configuration options:
 export NAMESPACE=dynamo-cloud
 kubectl create namespace ${NAMESPACE}
 
+# to pull model from HF
+export HF_TOKEN=<Token-Here>
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="$HF_TOKEN" \
+  -n ${NAMESPACE};
+
 # Deploy any example (this uses vLLM with Qwen model using aggregated serving)
 kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
 
@@ -60,11 +71,11 @@ kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
 kubectl get dynamoGraphDeployment -n ${NAMESPACE}
 
 # Test it
-kubectl port-forward svc/agg-vllm-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/models
 ```
 
-## What's a DynamoGraphDeployment?
+## What's a DynamoGraphDeployment (DGD)?
 
 It's a Kubernetes Custom Resource that defines your inference pipeline:
 - Model configuration
