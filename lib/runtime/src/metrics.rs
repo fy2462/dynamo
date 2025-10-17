@@ -601,7 +601,7 @@ pub trait MetricsHierarchy: Send + Sync {
     fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy>;
 
     /// Get a reference to this hierarchy's metrics registry
-    fn get_metrics_registry(&self) -> &dyn MetricsRegistryOps;
+    fn get_metrics_registry(&self) -> &MetricsRegistry;
 
     // ========================================================================
     // Provided methods - have default implementations
@@ -627,32 +627,9 @@ impl<T: MetricsHierarchy + ?Sized> MetricsHierarchy for &T {
         (**self).parent_hierarchies()
     }
 
-    fn get_metrics_registry(&self) -> &dyn MetricsRegistryOps {
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
         (**self).get_metrics_registry()
     }
-}
-
-/// Trait defining operations for metrics registry storage
-/// This trait is implemented by the `MetricsRegistry` struct and provides
-/// thread-safe access to registry operations through interior mutability.
-pub trait MetricsRegistryOps: Send + Sync {
-    /// Add a Prometheus metric collector to this registry
-    fn add_metric(&self, collector: Box<dyn prometheus::core::Collector>) -> anyhow::Result<()>;
-
-    /// Add an update callback that is executed before metrics are scraped
-    fn add_update_callback(&self, callback: PrometheusUpdateCallback);
-
-    /// Add an exposition format callback that returns additional Prometheus text
-    fn add_expfmt_callback(&self, callback: PrometheusExpositionFormatCallback);
-
-    /// Execute all registered update callbacks and return their results
-    fn execute_update_callbacks(&self) -> Vec<anyhow::Result<()>>;
-
-    /// Get a read guard to the Prometheus registry for scraping
-    fn get_prometheus_registry(&self) -> std::sync::RwLockReadGuard<'_, prometheus::Registry>;
-
-    /// Execute all exposition format callbacks and return concatenated text
-    fn execute_expfmt_callbacks(&self) -> String;
 }
 
 /// Type alias for runtime callback functions to reduce complexity
@@ -772,6 +749,23 @@ impl MetricsRegistry {
         result
     }
 
+    /// Add a Prometheus metric collector to this registry
+    pub fn add_metric(
+        &self,
+        collector: Box<dyn prometheus::core::Collector>,
+    ) -> anyhow::Result<()> {
+        self.prometheus_registry
+            .write()
+            .unwrap()
+            .register(collector)
+            .map_err(|e| anyhow::anyhow!("Failed to register metric: {}", e))
+    }
+
+    /// Get a read guard to the Prometheus registry for scraping
+    pub fn get_prometheus_registry(&self) -> std::sync::RwLockReadGuard<'_, prometheus::Registry> {
+        self.prometheus_registry.read().unwrap()
+    }
+
     /// Returns true if a metric with the given name already exists in the Prometheus registry
     pub fn has_metric_named(&self, metric_name: &str) -> bool {
         self.prometheus_registry
@@ -786,64 +780,6 @@ impl MetricsRegistry {
 impl Default for MetricsRegistry {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl MetricsRegistryOps for MetricsRegistry {
-    fn add_metric(&self, collector: Box<dyn prometheus::core::Collector>) -> anyhow::Result<()> {
-        self.prometheus_registry
-            .write()
-            .unwrap()
-            .register(collector)
-            .map_err(|e| anyhow::anyhow!("Failed to register metric: {}", e))
-    }
-
-    fn add_update_callback(&self, callback: PrometheusUpdateCallback) {
-        self.prometheus_update_callbacks
-            .write()
-            .unwrap()
-            .push(callback);
-    }
-
-    fn add_expfmt_callback(&self, callback: PrometheusExpositionFormatCallback) {
-        self.prometheus_expfmt_callbacks
-            .write()
-            .unwrap()
-            .push(callback);
-    }
-
-    fn execute_update_callbacks(&self) -> Vec<anyhow::Result<()>> {
-        self.prometheus_update_callbacks
-            .read()
-            .unwrap()
-            .iter()
-            .map(|callback| callback())
-            .collect()
-    }
-
-    fn get_prometheus_registry(&self) -> std::sync::RwLockReadGuard<'_, prometheus::Registry> {
-        self.prometheus_registry.read().unwrap()
-    }
-
-    fn execute_expfmt_callbacks(&self) -> String {
-        let mut result = String::new();
-        let callbacks = self.prometheus_expfmt_callbacks.read().unwrap();
-        for callback in callbacks.iter() {
-            match callback() {
-                Ok(text) => {
-                    if !text.is_empty() {
-                        if !result.is_empty() && !result.ends_with('\n') {
-                            result.push('\n');
-                        }
-                        result.push_str(&text);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Error executing exposition text callback: {}", e);
-                }
-            }
-        }
-        result
     }
 }
 
