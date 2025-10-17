@@ -196,6 +196,9 @@ ARG TENSORRTLLM_INDEX_URL
 COPY --from=trtllm_wheel /*.whl /trtllm_wheel/
 COPY --from=trtllm_wheel /*.txt /trtllm_wheel/
 
+# NOTE: locking cuda-python version to <13 to avoid breaks with tensorrt-llm 1.0.0rc6.
+RUN uv pip install "cuda-python>=12,<13"
+
 # Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
 # because there might be mismatched versions of TensorRT between the NGC PyTorch
 # and the TRTLLM wheel.
@@ -329,8 +332,6 @@ RUN apt-get update -y && \
     protobuf-compiler && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=runtime /usr/local/bin /usr/local/bin
-
 # Set workspace directory variable
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
@@ -342,8 +343,6 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
 
 COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
 COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
-
-COPY --from=runtime ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 # Install maturin, for maturin develop
 RUN uv pip install maturin[patchelf]
