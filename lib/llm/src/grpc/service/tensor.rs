@@ -235,6 +235,20 @@ fn dynamo_param_to_kserve(param: &tensor::ParameterValue) -> inference::InferPar
     }
 }
 
+// Test wrappers to expose conversion functions for unit testing
+#[cfg(test)]
+pub fn kserve_param_to_dynamo_test(
+    key: &str,
+    param: &inference::InferParameter,
+) -> Result<tensor::ParameterValue, Status> {
+    kserve_param_to_dynamo(key, param)
+}
+
+#[cfg(test)]
+pub fn dynamo_param_to_kserve_test(param: &tensor::ParameterValue) -> inference::InferParameter {
+    dynamo_param_to_kserve(param)
+}
+
 impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
     type Error = Status;
 
