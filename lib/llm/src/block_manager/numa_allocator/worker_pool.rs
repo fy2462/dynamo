@@ -212,19 +212,15 @@ impl NumaWorker {
 
             // Touch one byte per page to trigger first-touch policy efficiently
             // This is much faster than zeroing the entire region for large allocations
-            let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }.max(4096);
+            let page_size = (libc::sysconf(libc::_SC_PAGESIZE) as usize).max(4096);
             let mut offset = 0usize;
             while offset < size {
-                unsafe {
-                    std::ptr::write_volatile(ptr.add(offset), 0);
-                }
+                std::ptr::write_volatile(ptr.add(offset), 0);
                 offset = offset.saturating_add(page_size);
             }
             // Ensure the last page is touched
-            if size > 0 && size % page_size != 0 {
-                unsafe {
-                    std::ptr::write_volatile(ptr.add(size - 1), 0);
-                }
+            if size > 0 && !size.is_multiple_of(page_size) {
+                std::ptr::write_volatile(ptr.add(size - 1), 0);
             }
 
             // Verify final node after touching
